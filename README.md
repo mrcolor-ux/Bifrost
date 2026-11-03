@@ -14,7 +14,7 @@ The server uses only the Python 3 standard library, so there's nothing else to i
 
 ## Install (macOS)
 
-1. **Download** this repo and put it somewhere permanent, like `~/Documents/bifrost`.
+1. **Download** [this repo](https://github.com/mrcolor-ux/Bifrost/archive/refs/heads/main.zip) and put it somewhere permanent, like `~/Documents/bifrost`.
 2. **Double-click `install.command`.** It registers Bifrost in Claude Code and in the Claude desktop app, and backs up your config files first.
 3. **Quit Claude** (Cmd+Q) and open it again.
 4. **Install the plugin in Figma desktop.** Get it from [Figma Community](#) or, for development, use **Plugins → Development → Import plugin from manifest…** and pick `figma-plugin/manifest.json`.

@@ -24,7 +24,7 @@
 **Description:**
 > Bifrost is a bridge between Claude (the AI assistant by Anthropic) and Figma. Once connected, you can ask Claude to inspect your selection, rename layers, swap components from your design system, build frames with auto layout, update text and colors, or export frames for review — all inside the files you already work in.
 >
-> **Requires a small local server** (Python, included) that you install once from GitHub: <LINK DEL REPO>. The plugin only talks to that server on localhost:3055. Bifrost itself has no servers, analytics or accounts.
+> **Requires a small local server** (Python, included) that you install once from GitHub: https://github.com/mrcolor-ux/Bifrost. The plugin only talks to that server on localhost:3055. Bifrost itself has no servers, analytics or accounts.
 >
 > How to use:
 > 1. Run the installer from the GitHub repo (macOS).
@@ -41,7 +41,7 @@
 
 **Cover:** `assets/bifrost-cover-1920x1080.png`
 
-**Support contact:** el link de *Issues* del repo de GitHub, o un correo que quieras hacer público.
+**Support contact:** https://github.com/mrcolor-ux/Bifrost/issues, o un correo que quieras hacer público.
 
 **Network access / Data security:**
 - *Does your plugin make network requests?* Yes, only to `localhost:3055`, the user's own computer.
