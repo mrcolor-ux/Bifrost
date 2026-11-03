@@ -8,6 +8,7 @@ Claude <-> Figma bridge (MCP server, sin dependencias).
 """
 import asyncio
 import base64
+import contextvars
 import hashlib
 import json
 import os
@@ -23,6 +24,15 @@ HOST = "127.0.0.1"
 PORT = int(os.environ.get("FIGMA_BRIDGE_PORT", "3055"))
 TIMEOUT = float(os.environ.get("FIGMA_BRIDGE_TIMEOUT", "60"))
 MAX_TIMEOUT = 600
+# Para gastar menos tokens: respuestas más largas se recortan, y las herramientas de lectura resumen listas largas
+MAX_CHARS = int(os.environ.get("FIGMA_BRIDGE_MAX_CHARS", "20000"))
+MAX_CHILDREN = 20
+MAX_TEXT = 300
+MAX_NAME = 120
+READ_TOOLS = {"get_document_info", "get_selection", "get_node_info", "find_nodes"}
+# Una línea por llamada (herramienta, tamaño, tokens aproximados) para ver qué consume más
+USAGE_LOG = os.path.expanduser(os.environ.get("FIGMA_BRIDGE_USAGE_LOG", "~/.bifrost/usage.log"))
+current_tool = contextvars.ContextVar("current_tool", default=None)
 # Comandos que traen componentes de librerías: Figma solo los termina en la pestaña al frente
 FOREGROUND_COMMANDS = {"import_component", "import_nodes"}
 # Versión del plugin que espera este servidor (BIFROST_VERSION en code.js; los plugins viejos no la mandan)
@@ -254,6 +264,7 @@ TOOLS = [
             "El código es el cuerpo de una función async: usa `await` y `return` para devolver datos (JSON). "
             "Para cosas que las demás herramientas no cubren (componentes, variables, efectos, estilos...). "
             "Usa las versiones async de la API (getNodeByIdAsync, loadFontAsync antes de editar texto). "
+            f"Regresa solo los datos que necesitas (más de {MAX_CHARS} caracteres se recortan). "
             "Si falla, el error dice la línea. Para trabajos largos llama `progress('texto')` dentro del loop: "
             "cada llamada reinicia el límite de tiempo."
         ),
@@ -1065,8 +1076,76 @@ def send(obj):
         sys.stdout.flush()
 
 
+def compact(value):
+    """Resume lo que regresan las herramientas de lectura: listas de hijos y textos largos."""
+    if isinstance(value, list):
+        return [compact(v) for v in value]
+    if not isinstance(value, dict):
+        return value
+    out = {}
+    for k, v in value.items():
+        if k == "children" and isinstance(v, list) and len(v) > MAX_CHILDREN:
+            out[k] = [compact(c) for c in v[:MAX_CHILDREN]]
+            out["moreChildren"] = len(v) - MAX_CHILDREN
+        elif k == "characters" and isinstance(v, str) and len(v) > MAX_TEXT:
+            out[k] = v[:MAX_TEXT] + f"… ({len(v)} caracteres)"
+        elif k == "name" and isinstance(v, str) and len(v) > MAX_NAME:
+            # Las capas de texto se llaman igual que su contenido
+            out[k] = v[:MAX_NAME] + "…"
+        else:
+            out[k] = compact(v)
+    return out
+
+
+def clip(text):
+    if len(text) <= MAX_CHARS:
+        return text
+    return (text[:MAX_CHARS] + f"…\n[Recortado: la respuesta tenía {len(text)} caracteres. Pide menos datos: usa "
+            "limit/depth, filtra, o en run_code regresa solo los campos que necesitas.]")
+
+
+def image_size(data):
+    """Ancho y alto de un PNG en base64 (lee solo el encabezado)."""
+    try:
+        head = base64.b64decode(data[:44])
+        if head[:8] == b"\x89PNG\r\n\x1a\n":
+            return struct.unpack("!II", head[16:24])
+    except (ValueError, struct.error):
+        pass
+    return None
+
+
+def log_usage(tool, content, is_error):
+    chars = sum(len(c.get("text", "")) for c in content if c.get("type") == "text")
+    tokens = chars / 3.5
+    images = []
+    for c in content:
+        if c.get("type") == "image":
+            size = image_size(c.get("data", ""))
+            images.append(f"{size[0]}x{size[1]}" if size else "?")
+            # Claude cobra una imagen por píxeles: ~ancho*alto/750 tokens
+            tokens += size[0] * size[1] / 750 if size else 800
+    line = {"t": time.strftime("%Y-%m-%d %H:%M:%S"), "tool": tool, "chars": chars, "tokens": round(tokens)}
+    if images:
+        line["images"] = images
+    if is_error:
+        line["error"] = True
+    try:
+        os.makedirs(os.path.dirname(USAGE_LOG), exist_ok=True)
+        with open(USAGE_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(line, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
 def reply(req_id, result=None, error=None):
     msg = {"jsonrpc": "2.0", "id": req_id}
+    tool = current_tool.get()
+    if tool and isinstance(result, dict) and isinstance(result.get("content"), list):
+        for c in result["content"]:
+            if c.get("type") == "text":
+                c["text"] = clip(c["text"])
+        log_usage(tool, result["content"], bool(result.get("isError")))
     if error is not None:
         msg["error"] = error
     else:
@@ -1115,6 +1194,7 @@ async def handle_copy(bridge, req_id, args):
 
 async def handle_tool_call(bridge, req_id, params):
     name = params.get("name")
+    current_tool.set(name)
     args = params.get("arguments") or {}
     if name not in TOOL_NAMES:
         reply(req_id, error={"code": -32602, "message": f"Herramienta desconocida: {name}"})
@@ -1151,6 +1231,8 @@ async def handle_tool_call(bridge, req_id, params):
             mime = "image/jpeg" if fmt == "JPG" else "image/png"
             content = [{"type": "image", "data": result["base64"], "mimeType": mime}]
     else:
+        if name in READ_TOOLS:
+            result = compact(result)
         content = [{"type": "text", "text": json.dumps(result, ensure_ascii=False, separators=(',', ':'))}]
     content.insert(0, {"type": "text", "text": f"[Archivo: {file_name}]"})
     reply(req_id, {"content": content})

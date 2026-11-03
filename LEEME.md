@@ -73,6 +73,13 @@ Figma no deja que un plugin corra sin que lo lances, así que se apaga si cambia
 | `run_code` | Ejecutar JavaScript con la API completa de Figma (componentes, variables, efectos…). Los errores dicen la línea. Para trabajos largos, sube `timeout` o llama `progress()` dentro del loop |
 | `notify` | Mostrar un aviso en Figma |
 
+## Gastar menos tokens
+
+Claude lee todo lo que regresa Bifrost, así que las respuestas van cortas:
+- **Las herramientas de lectura** (`get_selection`, `get_node_info`…) listan máximo 20 hijos por nodo y recortan textos y nombres de capa largos.
+- **Cualquier respuesta de más de 20,000 caracteres** se recorta, con un aviso de cómo pedir menos. Se cambia con `FIGMA_BRIDGE_MAX_CHARS`.
+- **Cada llamada se anota** en `~/.bifrost/usage.log` con su tamaño y los tokens aproximados, para ver qué consume más.
+
 ## Problemas comunes
 
 - **“El plugin de Figma no está conectado”**: abre el plugin en Figma. Si ya estaba abierto, pulsa Conectar.

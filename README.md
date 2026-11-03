@@ -62,6 +62,13 @@ Some tips:
 
 Every tool accepts an optional `file` argument to target a specific connected file.
 
+## Saving tokens
+
+Everything Bifrost returns is read by Claude, so it keeps answers short:
+- **Read tools** (`get_selection`, `get_node_info`…) list at most 20 children per node, and cut long texts and layer names.
+- **Any answer over 20,000 characters** is cut, with a note on how to ask for less. Change it with `FIGMA_BRIDGE_MAX_CHARS`.
+- **Every call is logged** to `~/.bifrost/usage.log` with its size and approximate tokens, so you can see what costs the most.
+
 ## Privacy
 
 - **The plugin only talks to `localhost:3055`** on your own computer.
