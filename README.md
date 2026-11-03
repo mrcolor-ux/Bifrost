@@ -56,6 +56,7 @@ Some tips:
 | `set_text`, `set_fill`, `set_stroke`, `set_corner_radius`, `set_auto_layout` | Edit styles |
 | `move_node`, `resize_node`, `rename_node`, `clone_node`, `delete_node` | Move, resize, rename, duplicate and delete |
 | `export_image` | Export PNG, JPG or SVG so Claude can see the design, optionally over a `background` color (for white-on-transparent designs) |
+| `index_library`, `find_components`, `import_component` | Index a design system once, then search it and insert its components as library instances by name and variant, from any file |
 | `run_code` | Run JavaScript with the full Figma Plugin API (components, variables, effects…). Errors include the failing line. For long jobs, raise `timeout` or call `progress()` inside the loop |
 | `notify` | Show a toast in Figma |
 

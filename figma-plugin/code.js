@@ -5,7 +5,7 @@
 
 // Súbelo junto con PLUGIN_VERSION de server.py cuando agregues o cambies comandos,
 // para que el servidor avise si una pestaña trae una versión vieja.
-var BIFROST_VERSION = 3;
+var BIFROST_VERSION = 4;
 
 if (figma.command === 'disconnect') {
   figma.closePlugin('Claude desconectado');
@@ -107,6 +107,18 @@ async function getNode(id) {
   var node = await figma.getNodeByIdAsync(id);
   if (!node) throw new Error('No existe el nodo ' + id);
   return node;
+}
+
+// Figma no termina de importar de una librería si la pestaña está en segundo plano: no esperar para siempre
+function importByKey(key) {
+  return Promise.race([
+    figma.importComponentByKeyAsync(key),
+    new Promise(function (resolve, reject) {
+      setTimeout(function () {
+        reject(new Error('Figma no respondió al traer el componente de la librería. Pon al frente la pestaña de ' + figma.root.name + ' y vuelve a intentarlo'));
+      }, 15000);
+    })
+  ]);
 }
 
 async function getParent(parentId) {
@@ -424,6 +436,67 @@ var commands = {
       variablesNotLinked: ctx.varMisses,
       warnings: ctx.warnings.concat(data.warnings || [])
     };
+  },
+
+  // Índice del Design System: el servidor lo guarda y lo usa para importar componentes por nombre
+  index_library: async function (p, progress) {
+    await figma.loadAllPagesAsync();
+    var out = [];
+    var pages = figma.root.children;
+    for (var i = 0; i < pages.length; i++) {
+      var page = pages[i];
+      progress(page.name);
+      var nodes = page.findAllWithCriteria({ types: ['COMPONENT_SET', 'COMPONENT'] });
+      for (var j = 0; j < nodes.length; j++) {
+        var n = nodes[j];
+        if (n.type === 'COMPONENT' && n.parent && n.parent.type === 'COMPONENT_SET') continue;
+        var entry = { name: n.name, key: n.key, type: n.type === 'COMPONENT_SET' ? 'SET' : 'COMPONENT', page: page.name };
+        if (n.description) entry.description = n.description.slice(0, 200);
+        try { if (await n.getPublishStatusAsync() === 'UNPUBLISHED') entry.unpublished = true; } catch (e) {}
+        if (n.type === 'COMPONENT_SET') {
+          // La variante por default va primero
+          var def = n.defaultVariant;
+          entry.variants = n.children.filter(function (c) { return c.type === 'COMPONENT'; })
+            .sort(function (a, b) { return (a === def ? -1 : 0) - (b === def ? -1 : 0); })
+            .map(function (c) { return { name: c.name, key: c.key }; });
+        }
+        out.push(entry);
+      }
+    }
+    return { library: figma.root.name, components: out };
+  },
+
+  import_component: async function (p) {
+    var comp;
+    try {
+      comp = await importByKey(p.key);
+    } catch (e) {
+      throw new Error('No pude traer el componente de la librería. Revisa que esté publicado y que la librería esté activada en este archivo (' + ((e && e.message) || e) + ')');
+    }
+    var inst = comp.createInstance();
+    try {
+      var parent = await getParent(p.parentId);
+      await loadNodeFonts(inst, { missingFonts: {} });
+      if (inst.parent !== parent) parent.appendChild(inst);
+      if (p.nextToId) {
+        var rb = (await getNode(p.nextToId)).absoluteBoundingBox;
+        inst.x = Math.round(rb.x + rb.width + (p.gap === undefined ? 200 : p.gap));
+        inst.y = Math.round(rb.y);
+      } else if (p.x !== undefined || p.y !== undefined) {
+        if (p.x !== undefined) inst.x = p.x;
+        if (p.y !== undefined) inst.y = p.y;
+      } else if (parent.type === 'PAGE') {
+        var c = figma.viewport.center;
+        inst.x = Math.round(c.x - inst.width / 2);
+        inst.y = Math.round(c.y - inst.height / 2);
+      }
+    } catch (e) {
+      inst.remove();
+      throw e;
+    }
+    figma.currentPage.selection = [inst];
+    figma.viewport.scrollAndZoomIntoView([inst]);
+    return serialize(inst, 0);
   }
 };
 
@@ -707,7 +780,7 @@ async function applyOverrides(node, d, ctx) {
     if (cd.type === 'INSTANCE' && kid.type === 'INSTANCE' && cd.componentKey) {
       var km = await kid.getMainComponentAsync();
       if (km && km.key !== cd.componentKey) {
-        try { kid.swapComponent(await figma.importComponentByKeyAsync(cd.componentKey)); } catch (e) {}
+        try { kid.swapComponent(await importByKey(cd.componentKey)); } catch (e) {}
       }
       if (cd.componentProps) { try { kid.setProperties(cd.componentProps); } catch (e) {} }
     }
@@ -746,7 +819,7 @@ async function importNode(d, parent, ctx) {
 
   if (t === 'INSTANCE' && d.componentKey) {
     try {
-      var comp = await figma.importComponentByKeyAsync(d.componentKey);
+      var comp = await importByKey(d.componentKey);
       node = comp.createInstance();
     } catch (e) {
       ctx.detached.push(d.componentName || d.name);

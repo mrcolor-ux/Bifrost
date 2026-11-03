@@ -16,18 +16,23 @@ import struct
 import sys
 import threading
 import time
+import unicodedata
 import uuid
 
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("FIGMA_BRIDGE_PORT", "3055"))
 TIMEOUT = float(os.environ.get("FIGMA_BRIDGE_TIMEOUT", "60"))
 MAX_TIMEOUT = 600
+# Comandos que traen componentes de librerías: Figma solo los termina en la pestaña al frente
+FOREGROUND_COMMANDS = {"import_component", "import_nodes"}
 # Versión del plugin que espera este servidor (BIFROST_VERSION en code.js; los plugins viejos no la mandan)
-PLUGIN_VERSION = 3
+PLUGIN_VERSION = 4
 # Si no hay plugin conectado, correr Bifrost desde el menú Plugins de Figma para encenderlo solo
 AUTOLAUNCH = os.environ.get("FIGMA_BRIDGE_AUTOLAUNCH", "1") != "0"
 # Archivos ya vistos (key -> nombre), para abrir su pestaña y conectarlos solos
 KNOWN_FILES_PATH = os.path.expanduser(os.environ.get("FIGMA_BRIDGE_FILES", "~/.bifrost/files.json"))
+# Índices de librerías (Design Systems): un JSON por librería
+LIBRARY_DIR = os.path.expanduser(os.environ.get("FIGMA_BRIDGE_LIBRARY", "~/.bifrost/library"))
 FIGMA_URL_RE = re.compile(r"figma\.com/(?:design|file|board|proto|slides)/([A-Za-z0-9]+)")
 # La app de escritorio guarda aquí sus pestañas abiertas (título + key)
 FIGMA_SETTINGS_PATH = os.path.expanduser("~/Library/Application Support/Figma/settings.json")
@@ -301,7 +306,196 @@ TOOLS.insert(0, {
     ),
     "inputSchema": schema(),
 })
+PLACE_PARAMS = {
+    "nextToId": {"type": "string", "description": "Ponerlo a la derecha de este nodo"},
+    "gap": {"type": "number", "description": "Separación con nextToId (default 200)"},
+    "x": {"type": "number"}, "y": {"type": "number"},
+    "parentId": PARENT_ID,
+}
+TOOLS += [
+    {
+        "name": "index_library",
+        "description": (
+            "Lee todos los componentes de un Design System (sets con sus variantes y su clave de librería) y guarda "
+            "el índice en este equipo, para buscarlos e importarlos después desde cualquier archivo sin abrir el DS. "
+            "Vuelve a correrlo cuando el DS cambie."
+        ),
+        "inputSchema": schema({"file": {**FILE_PARAM, "description": "El archivo del Design System"}}),
+    },
+    {
+        "name": "find_components",
+        "description": (
+            "Busca componentes en los Design Systems indexados (index_library), por nombre, página, descripción o "
+            "nombre de variante. No necesita Figma. Devuelve nombre, librería y variantes que coinciden."
+        ),
+        "inputSchema": schema({
+            "query": {"type": "string", "description": "Palabras a buscar (sin importar acentos ni mayúsculas)"},
+            "library": {"type": "string", "description": "Solo en esta librería (parte del nombre)"},
+            "limit": {"type": "number", "description": "Máximo de resultados (default 15)"},
+        }, ["query"]),
+    },
+    {
+        "name": "import_component",
+        "description": (
+            "Inserta una instancia de un componente de un Design System indexado (como instancia de la librería, no "
+            "copia suelta), buscándolo por nombre y variante. La librería debe estar activada en el archivo destino."
+        ),
+        "inputSchema": schema({
+            "name": {"type": "string", "description": "Nombre del componente o set (exacto o parte única)"},
+            "variant": {"type": "string", "description": "Variante: su nombre completo ('Tipo=OUOF003 Movilidad') o una parte única ('Movilidad'). Default: la variante por default"},
+            "key": {"type": "string", "description": "En vez de name: la clave del componente o variante"},
+            "library": {"type": "string", "description": "Librería donde buscar (parte del nombre)"},
+            "page": {"type": "string", "description": "Página del DS donde está, si hay nombres repetidos"},
+            "file": {**FILE_PARAM, "description": "Archivo donde insertarlo"},
+            **PLACE_PARAMS,
+        }),
+    },
+]
 TOOL_NAMES = {t["name"] for t in TOOLS}
+
+
+# ---------------------------------------------------------------------------
+# Índice de Design Systems
+# ---------------------------------------------------------------------------
+
+def norm(text):
+    """Minúsculas y sin acentos, para buscar."""
+    text = unicodedata.normalize("NFKD", str(text or "").lower())
+    return "".join(c for c in text if not unicodedata.combining(c))
+
+
+def library_path(name):
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", norm(name)).strip("_") or "libreria"
+    return os.path.join(LIBRARY_DIR, safe + ".json")
+
+
+def load_libraries(library=None):
+    libs = []
+    try:
+        names = sorted(os.listdir(LIBRARY_DIR))
+    except OSError:
+        return libs
+    for fn in names:
+        if not fn.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(LIBRARY_DIR, fn), encoding="utf-8") as f:
+                lib = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if library and norm(library) not in norm(lib.get("library")):
+            continue
+        libs.append(lib)
+    return libs
+
+
+def save_library(data, file_key):
+    comps = data.get("components") or []
+    lib = {
+        "library": data.get("library"),
+        "fileKey": file_key,
+        "indexedAt": time.strftime("%Y-%m-%d %H:%M"),
+        "components": comps,
+    }
+    os.makedirs(LIBRARY_DIR, exist_ok=True)
+    path = library_path(lib["library"])
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(lib, f, ensure_ascii=False)
+    return {
+        "library": lib["library"],
+        "sets": sum(1 for c in comps if c["type"] == "SET"),
+        "components": sum(1 for c in comps if c["type"] == "COMPONENT"),
+        "variants": sum(len(c.get("variants") or []) for c in comps),
+        "unpublished": sum(1 for c in comps if c.get("unpublished")),
+        "savedTo": path,
+    }
+
+
+def find_components(query, library=None, limit=15):
+    words = norm(query).split()
+    results = []
+    for lib in load_libraries(library):
+        for c in lib.get("components") or []:
+            own = norm(" ".join([c.get("name", ""), c.get("page", ""), c.get("description", "")]))
+            variants = c.get("variants") or []
+            if all(w in own for w in words):
+                hits = variants
+            else:
+                hits = [v for v in variants if all(w in own + " " + norm(v["name"]) for w in words)]
+                if not hits:
+                    continue
+            item = {"library": lib.get("library"), "name": c["name"], "type": c["type"], "page": c.get("page")}
+            if c.get("unpublished"):
+                item["unpublished"] = True
+            if variants:
+                item["variantCount"] = len(variants)
+                item["variants"] = [v["name"] for v in hits[:12]]
+            else:
+                item["key"] = c["key"]
+            results.append(item)
+    # Primero los que coinciden por nombre exacto
+    q = norm(query)
+    results.sort(key=lambda r: (norm(r["name"]) != q, q not in norm(r["name"]), len(r["name"])))
+    return results[:limit]
+
+
+def describe(option):
+    page = (option.get("page") or "").strip()
+    return f"{option['name']} ({page})" if page else option["name"]
+
+
+def pick_one(options, label, what):
+    if len(options) == 1:
+        return options[0]
+    if not options:
+        raise RuntimeError(f"No encontré {what} '{label}'. Búscalo con find_components.")
+    names = ", ".join(sorted({describe(o) for o in options})[:15])
+    raise RuntimeError(f"Hay varios {what}s que coinciden con '{label}': {names}. Sé más específico (o pasa page).")
+
+
+def match_variants(variants, variant):
+    vq = norm(variant)
+    parts = [x.strip() for x in vq.split(",") if x.strip()]
+    return ([v for v in variants if norm(v["name"]) == vq]
+            or [v for v in variants if all(x in [y.strip() for y in norm(v["name"]).split(",")] for x in parts)]
+            or [v for v in variants if vq in norm(v["name"])])
+
+
+def resolve_component(name=None, variant=None, key=None, library=None, page=None):
+    """Nombre (y variante) -> clave de componente para importComponentByKeyAsync."""
+    libs = load_libraries(library)
+    if not libs:
+        raise RuntimeError("No hay Design Systems indexados. Corre index_library en el archivo del DS.")
+    comps = [dict(c, library=lib.get("library")) for lib in libs for c in lib.get("components") or []]
+    if key:
+        for c in comps:
+            if c["key"] == key:
+                return c["key"] if c["type"] == "COMPONENT" else c["variants"][0]["key"], c["name"], None
+            for v in c.get("variants") or []:
+                if v["key"] == key:
+                    return key, c["name"], v["name"]
+        return key, None, None  # puede ser de una librería no indexada
+    if not name:
+        raise RuntimeError("Pasa name (o key) del componente.")
+    if page:
+        comps = [c for c in comps if norm(page) in norm(c.get("page"))]
+    q = norm(name)
+    options = [c for c in comps if norm(c["name"]) == q] or [c for c in comps if q in norm(c["name"])]
+    # Desempatar nombres repetidos: por la variante pedida y luego por los publicados
+    if len(options) > 1 and variant:
+        options = [c for c in options if match_variants(c.get("variants") or [], variant)] or options
+    if len(options) > 1:
+        options = [c for c in options if not c.get("unpublished")] or options
+    comp = pick_one(options, name, "componente")
+    if comp.get("unpublished"):
+        raise RuntimeError(f"'{describe(comp)}' no está publicado en {comp['library']}; publícalo para poder importarlo.")
+    if comp["type"] == "COMPONENT":
+        return comp["key"], comp["name"], None
+    variants = comp.get("variants") or []
+    if not variant:
+        return variants[0]["key"], comp["name"], variants[0]["name"]
+    v = pick_one(match_variants(variants, variant), variant, f"variante de {comp['name']}")
+    return v["key"], comp["name"], v["name"]
 
 
 # ---------------------------------------------------------------------------
@@ -740,6 +934,16 @@ class Bridge:
                 break
             self.awaiting_key = None
 
+    async def bring_to_front(self, session):
+        """Figma solo importa componentes de librerías en la pestaña que está al frente."""
+        if not session.file_key or sys.platform != "darwin":
+            return
+        proc = await asyncio.create_subprocess_exec(
+            "open", "-a", "Figma", f"https://www.figma.com/design/{session.file_key}",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await proc.wait()
+        await asyncio.sleep(1)
+
     async def press_launch_shortcut(self):
         """Corre Bifrost desde el menú Plugins de Figma (funciona aunque Figma esté recién abierto);
         si no lo encuentra en el menú, usa Cmd+Option+P (Run last plugin)."""
@@ -816,6 +1020,8 @@ class Bridge:
                     "En Figma: Plugins > Development > Bifrost > Conectar a Claude."
                 )
         session = self.pick(file_query)
+        if command in FOREGROUND_COMMANDS:
+            await self.bring_to_front(session)
         req_id = uuid.uuid4().hex
         fut = asyncio.get_running_loop().create_future()
         self.pending[req_id] = fut
@@ -868,6 +1074,29 @@ def reply(req_id, result=None, error=None):
     send(msg)
 
 
+async def handle_library(bridge, req_id, name, args):
+    try:
+        if name == "find_components":
+            result = find_components(args.get("query", ""), args.get("library"), int(args.get("limit") or 15))
+            if not result and not load_libraries():
+                result = "No hay Design Systems indexados. Corre index_library en el archivo del DS."
+        elif name == "index_library":
+            file_name, data = await bridge.call("index_library", {"file": args.get("file")}, timeout=300)
+            session = bridge.pick(file_name) if bridge.listening else None
+            result = save_library(data, session.file_key if session else None)
+        else:
+            key, comp, variant = resolve_component(
+                args.get("name"), args.get("variant"), args.get("key"), args.get("library"), args.get("page"))
+            params = {k: args[k] for k in PLACE_PARAMS if k in args}
+            params.update(file=args.get("file"), key=key)
+            file_name, node = await bridge.call("import_component", params)
+            result = {"file": file_name, "component": comp, "variant": variant, "node": node}
+    except Exception as e:
+        reply(req_id, {"content": [{"type": "text", "text": f"Error: {e}"}], "isError": True})
+        return
+    reply(req_id, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, separators=(',', ':'))}]})
+
+
 async def handle_copy(bridge, req_id, args):
     """Origen -> export_nodes, destino -> import_nodes. El JSON nunca sale del servidor."""
     try:
@@ -897,6 +1126,9 @@ async def handle_tool_call(bridge, req_id, params):
             reply(req_id, {"content": [{"type": "text", "text": f"Error: {e}"}], "isError": True})
             return
         reply(req_id, {"content": [{"type": "text", "text": json.dumps(files, ensure_ascii=False, separators=(',', ':'))}]})
+        return
+    if name in ("index_library", "find_components", "import_component"):
+        await handle_library(bridge, req_id, name, dict(args))
         return
     if name == "copy_nodes":
         await handle_copy(bridge, req_id, dict(args))
