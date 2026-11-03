@@ -68,8 +68,8 @@ Figma no deja que un plugin corra sin que lo lances, así que se apaga si cambia
 | `create_frame`, `create_rectangle`, `create_ellipse`, `create_text` | Crear elementos |
 | `set_text`, `set_fill`, `set_stroke`, `set_corner_radius`, `set_auto_layout` | Editar estilos |
 | `move_node`, `resize_node`, `rename_node`, `clone_node`, `delete_node` | Mover, redimensionar, renombrar, duplicar y borrar |
-| `export_image` | Exportar a PNG, JPG o SVG para que Claude vea el diseño |
-| `run_code` | Ejecutar JavaScript con la API completa de Figma (componentes, variables, efectos…) |
+| `export_image` | Exportar a PNG, JPG o SVG para que Claude vea el diseño, opcionalmente sobre un color de fondo (`background`) para diseños blancos sobre transparente |
+| `run_code` | Ejecutar JavaScript con la API completa de Figma (componentes, variables, efectos…). Los errores dicen la línea. Para trabajos largos, sube `timeout` o llama `progress()` dentro del loop |
 | `notify` | Mostrar un aviso en Figma |
 
 ## Problemas comunes

@@ -5,7 +5,7 @@
 
 // Súbelo junto con PLUGIN_VERSION de server.py cuando agregues o cambies comandos,
 // para que el servidor avise si una pestaña trae una versión vieja.
-var BIFROST_VERSION = 2;
+var BIFROST_VERSION = 3;
 
 if (figma.command === 'disconnect') {
   figma.closePlugin('Claude desconectado');
@@ -327,17 +327,22 @@ var commands = {
     if (!('exportAsync' in n)) throw new Error('Ese nodo no se puede exportar');
     var format = p.format || 'PNG';
     var maxSide = Math.max(n.width, n.height) || 1;
-    var scale = Math.min(p.scale || 1, (p.maxSize || 800) / maxSide);
+    var scale = Math.max(Math.min(p.scale || 1, (p.maxSize || 800) / maxSide), 0.01);
     var settings = format === 'SVG'
       ? { format: 'SVG' }
-      : { format: format, constraint: { type: 'SCALE', value: Math.max(scale, 0.01) } };
+      : { format: format, constraint: { type: 'SCALE', value: scale } };
     var bytes = await n.exportAsync(settings);
+    if (p.background && format !== 'SVG') bytes = await withBackground(n, bytes, p.background, format, scale);
     return { format: format, base64: figma.base64Encode(bytes) };
   },
 
-  run_code: async function (p) {
-    var fn = new Function('figma', 'return (async function () {\n' + p.code + '\n})();');
-    var result = await fn(figma);
+  run_code: async function (p, progress) {
+    var fn;
+    try {
+      fn = new Function('figma', 'progress', 'return (async function () {\n' + p.code + '\n})();');
+    } catch (e) { throw codeError(e, p.code); }
+    var result;
+    try { result = await fn(figma, progress); } catch (e) { throw codeError(e, p.code); }
     if (result && typeof result === 'object' && 'type' in result && 'id' in result) return serialize(result, 1);
     return result === undefined ? null : result;
   },
@@ -810,14 +815,63 @@ async function importNode(d, parent, ctx) {
   return node;
 }
 
+// Líneas que agregan new Function y el envoltorio async antes del código de run_code
+var RUN_CODE_HEADER_LINES = 3;
+
+// Agrega al error la línea del código de Claude donde falló (el stack trae "<input>:línea:columna")
+function codeError(e, code) {
+  var msg = (e && e.message) ? e.message : String(e);
+  var m = /<input>:(\d+):(\d+)/.exec(String((e && e.stack) || ''));
+  var lines = String(code).split('\n');
+  var line = m ? Number(m[1]) - RUN_CODE_HEADER_LINES : 0;
+  if (line < 1 || line > lines.length) return new Error(msg);
+  return new Error(msg + ' (línea ' + line + ': ' + lines[line - 1].trim().slice(0, 120) + ')');
+}
+
+// Exporta el nodo sobre un color sólido, para ver diseños blancos sobre transparente.
+// Lo clona dentro de un frame temporal; si no se puede mover (ej. fuentes faltantes), usa la imagen ya exportada.
+async function withBackground(n, bytes, color, format, scale) {
+  var frame = figma.createFrame();
+  var copy = null;
+  var settings = { format: format, constraint: { type: 'SCALE', value: scale } };
+  try {
+    frame.name = 'Bifrost · fondo temporal';
+    frame.x = n.absoluteBoundingBox ? n.absoluteBoundingBox.x : 0;
+    frame.y = n.absoluteBoundingBox ? n.absoluteBoundingBox.y : 0;
+    frame.resize(Math.max(n.width, 0.01), Math.max(n.height, 0.01));
+    frame.clipsContent = true;
+    frame.fills = solid(color);
+    try {
+      copy = n.clone();
+      frame.appendChild(copy);
+      copy.x = 0;
+      copy.y = 0;
+      return await frame.exportAsync(settings);
+    } catch (e) {
+      var image = figma.createImage(bytes);
+      frame.fills = [solid(color)[0], { type: 'IMAGE', scaleMode: 'FILL', imageHash: image.hash }];
+      // Figma tarda un momento en poder dibujar una imagen recién creada
+      await new Promise(function (r) { setTimeout(r, 800); });
+      return await frame.exportAsync(settings);
+    }
+  } finally {
+    if (copy && !copy.removed) copy.remove();
+    frame.remove();
+  }
+}
+
 figma.ui.onmessage = async function (msg) {
   if (msg && msg.type === 'status') { onStatus(msg.state); return; }
   if (msg && msg.type === 'close') { figma.closePlugin('Claude desconectado'); return; }
   if (!msg || !msg.id || !msg.command) return;
   var handler = commands[msg.command];
+  // Avisa al servidor que el comando sigue vivo, para que no se corte por tiempo
+  var progress = function (message) {
+    figma.ui.postMessage({ type: 'progress', id: msg.id, message: message === undefined ? null : String(message) });
+  };
   try {
     if (!handler) throw new Error('Comando desconocido: ' + msg.command);
-    var result = await handler(msg.params || {});
+    var result = await handler(msg.params || {}, progress);
     figma.ui.postMessage({ id: msg.id, result: result });
   } catch (e) {
     figma.ui.postMessage({ id: msg.id, error: (e && e.message) ? e.message : String(e) });

@@ -21,8 +21,9 @@ import uuid
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("FIGMA_BRIDGE_PORT", "3055"))
 TIMEOUT = float(os.environ.get("FIGMA_BRIDGE_TIMEOUT", "60"))
+MAX_TIMEOUT = 600
 # Versión del plugin que espera este servidor (BIFROST_VERSION en code.js; los plugins viejos no la mandan)
-PLUGIN_VERSION = 2
+PLUGIN_VERSION = 3
 # Si no hay plugin conectado, correr Bifrost desde el menú Plugins de Figma para encenderlo solo
 AUTOLAUNCH = os.environ.get("FIGMA_BRIDGE_AUTOLAUNCH", "1") != "0"
 # Archivos ya vistos (key -> nombre), para abrir su pestaña y conectarlos solos
@@ -238,6 +239,7 @@ TOOLS = [
             "format": {"type": "string", "enum": ["PNG", "JPG", "SVG"], "description": "Default PNG"},
             "scale": {"type": "number", "description": "Default 1"},
             "maxSize": {"type": "number", "description": "Lado mayor máximo en px (default 800, para ahorrar tokens)"},
+            "background": {**COLOR, "description": "Color de fondo (PNG/JPG), para ver diseños blancos o transparentes. Ej. #1A6B47"},
         }, ["nodeId"]),
     },
     {
@@ -246,9 +248,14 @@ TOOLS = [
             "Ejecuta JavaScript con la API de plugins de Figma (objeto `figma`). "
             "El código es el cuerpo de una función async: usa `await` y `return` para devolver datos (JSON). "
             "Para cosas que las demás herramientas no cubren (componentes, variables, efectos, estilos...). "
-            "Usa las versiones async de la API (getNodeByIdAsync, loadFontAsync antes de editar texto)."
+            "Usa las versiones async de la API (getNodeByIdAsync, loadFontAsync antes de editar texto). "
+            "Si falla, el error dice la línea. Para trabajos largos llama `progress('texto')` dentro del loop: "
+            "cada llamada reinicia el límite de tiempo."
         ),
-        "inputSchema": schema({"code": {"type": "string"}}, ["code"]),
+        "inputSchema": schema({
+            "code": {"type": "string"},
+            "timeout": {"type": "number", "description": f"Segundos sin respuesta ni progress() antes de cortar (default {TIMEOUT:.0f}, máx {MAX_TIMEOUT})"},
+        }, ["code"]),
     },
     {
         "name": "notify",
@@ -383,6 +390,7 @@ class Bridge:
     def __init__(self):
         self.files = []          # FileSession, varios archivos a la vez
         self.pending = {}
+        self.progress = {}       # id de la llamada -> última vez que el plugin avisó que sigue trabajando
         self.listening = False   # esta sesión tiene el puerto (es la central)
         self.hub = None          # conexión a la sesión central, si esta es cliente
         self.hub_pending = {}
@@ -494,17 +502,13 @@ class Bridge:
             log("La sesión central se cerró; intento quedarme con el puerto")
         return True
 
-    async def ask_hub(self, payload, timeout):
+    async def ask_hub(self, payload):
         req_id = uuid.uuid4().hex
         fut = asyncio.get_running_loop().create_future()
         self.hub_pending[req_id] = fut
         await self.hub.send_text(json.dumps({"id": req_id, **payload}))
-        try:
-            # La central aplica el timeout real; aquí solo un margen por si se cuelga
-            msg = await asyncio.wait_for(fut, timeout + 30)
-        except asyncio.TimeoutError:
-            self.hub_pending.pop(req_id, None)
-            raise RuntimeError(f"La sesión central de Bifrost no respondió en {timeout + 30:.0f}s")
+        # La central aplica el límite de tiempo (que progress() puede alargar), o se desconecta
+        msg = await fut
         if "error" in msg:
             raise RuntimeError(msg["error"])
         return msg
@@ -630,6 +634,12 @@ class Bridge:
                         session.file_key = same[0]
                 self.remember(session.file_key, session.file_name)
                 self.connected.set()
+            return
+        if kind == "progress":
+            if msg.get("id") in self.pending:
+                self.progress[msg["id"]] = time.monotonic()
+                if msg.get("message"):
+                    log(f"[{session.file_name}]", msg["message"])
             return
         fut = self.pending.pop(msg.get("id"), None)
         if fut and not fut.done():
@@ -770,7 +780,7 @@ class Bridge:
     async def list_files_any(self):
         await self.wait_ready()
         if self.hub:
-            return (await self.ask_hub({"op": "list_files"}, 30)).get("result")
+            return (await self.ask_hub({"op": "list_files"})).get("result")
         if self.listening:
             return await self.list_files_launching()
         return self.list_files()
@@ -787,7 +797,7 @@ class Bridge:
         timeout = timeout or TIMEOUT
         await self.wait_ready()
         if self.hub:
-            msg = await self.ask_hub({"command": command, "params": params, "timeout": timeout}, timeout)
+            msg = await self.ask_hub({"command": command, "params": params, "timeout": timeout})
             return msg.get("file"), msg.get("result")
         if not self.listening:
             raise self.not_connected_error()
@@ -810,11 +820,23 @@ class Bridge:
         fut = asyncio.get_running_loop().create_future()
         self.pending[req_id] = fut
         await session.conn.send_text(json.dumps({"id": req_id, "command": command, "params": params}))
+        start = time.monotonic()
         try:
-            msg = await asyncio.wait_for(fut, timeout)
-        except asyncio.TimeoutError:
-            self.pending.pop(req_id, None)
-            raise RuntimeError(f"Figma ({session.file_name}) no respondió en {timeout:.0f}s")
+            while True:
+                # Cada progress() del plugin vuelve a empezar la cuenta
+                left = max(start, self.progress.get(req_id, 0)) + timeout - time.monotonic()
+                if left <= 0:
+                    self.pending.pop(req_id, None)
+                    raise RuntimeError(
+                        f"Figma ({session.file_name}) no respondió en {timeout:.0f}s. Para trabajos largos en "
+                        "run_code sube `timeout` o llama progress() dentro del loop; Figma puede seguir trabajando.")
+                try:
+                    msg = await asyncio.wait_for(asyncio.shield(fut), left)
+                    break
+                except asyncio.TimeoutError:
+                    continue
+        finally:
+            self.progress.pop(req_id, None)
         if "error" in msg:
             err = f"[{session.file_name}] {msg['error']}"
             if session.outdated:
@@ -879,8 +901,12 @@ async def handle_tool_call(bridge, req_id, params):
     if name == "copy_nodes":
         await handle_copy(bridge, req_id, dict(args))
         return
+    args = dict(args)
+    timeout = None
+    if args.get("timeout"):
+        timeout = min(max(float(args.pop("timeout")), 1), MAX_TIMEOUT)
     try:
-        file_name, result = await bridge.call(name, dict(args))
+        file_name, result = await bridge.call(name, args, timeout)
     except Exception as e:
         reply(req_id, {"content": [{"type": "text", "text": f"Error: {e}"}], "isError": True})
         return

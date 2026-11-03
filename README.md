@@ -55,8 +55,8 @@ Some tips:
 | `create_frame`, `create_rectangle`, `create_ellipse`, `create_text` | Create elements |
 | `set_text`, `set_fill`, `set_stroke`, `set_corner_radius`, `set_auto_layout` | Edit styles |
 | `move_node`, `resize_node`, `rename_node`, `clone_node`, `delete_node` | Move, resize, rename, duplicate and delete |
-| `export_image` | Export PNG, JPG or SVG so Claude can see the design |
-| `run_code` | Run JavaScript with the full Figma Plugin API (components, variables, effects…) |
+| `export_image` | Export PNG, JPG or SVG so Claude can see the design, optionally over a `background` color (for white-on-transparent designs) |
+| `run_code` | Run JavaScript with the full Figma Plugin API (components, variables, effects…). Errors include the failing line. For long jobs, raise `timeout` or call `progress()` inside the loop |
 | `notify` | Show a toast in Figma |
 
 Every tool accepts an optional `file` argument to target a specific connected file.
