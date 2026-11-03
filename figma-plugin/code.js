@@ -329,8 +329,443 @@ var commands = {
   notify: async function (p) {
     figma.notify(String(p.message));
     return { ok: true };
+  },
+
+  // Copiar entre archivos: el servidor llama export_nodes en el origen e import_nodes en el destino
+  export_nodes: async function (p) {
+    var nodes = [];
+    if (p.nodeIds && p.nodeIds.length) {
+      for (var i = 0; i < p.nodeIds.length; i++) nodes.push(await getNode(p.nodeIds[i]));
+    } else {
+      nodes = figma.currentPage.selection.slice();
+    }
+    if (!nodes.length) throw new Error('No hay nada seleccionado para copiar en ' + figma.root.name);
+    var ctx = { images: {}, count: 0, warnings: [] };
+    var out = [];
+    for (var j = 0; j < nodes.length; j++) {
+      var d = await exportNode(nodes[j], ctx);
+      var box = nodes[j].absoluteBoundingBox;
+      if (box) { d.absX = box.x; d.absY = box.y; }
+      out.push(d);
+    }
+    return { sourceFile: figma.root.name, nodes: out, images: ctx.images, count: ctx.count, warnings: ctx.warnings };
+  },
+
+  import_nodes: async function (p) {
+    var data = p.data;
+    if (!data || !data.nodes) throw new Error('No llegaron nodos para pegar');
+    var parent = await getParent(p.parentId);
+    var ctx = { images: data.images || {}, imageCache: {}, count: 0, detached: [], missingFonts: {}, styleMisses: 0, varMisses: 0, warnings: [] };
+    var created = [];
+    for (var i = 0; i < data.nodes.length; i++) {
+      var n = await importNode(data.nodes[i], parent, ctx);
+      if (n) created.push(n);
+    }
+    // Colocar el grupo pegado conservando la posición relativa entre nodos
+    var minX = Infinity, minY = Infinity;
+    data.nodes.forEach(function (d) {
+      if (d.absX !== undefined) { minX = Math.min(minX, d.absX); minY = Math.min(minY, d.absY); }
+    });
+    var baseX = p.x, baseY = p.y;
+    if (p.nextToId) {
+      var ref = await getNode(p.nextToId);
+      var rb = ref.absoluteBoundingBox;
+      baseX = rb.x + rb.width + (p.gap === undefined ? 200 : p.gap);
+      baseY = rb.y;
+    }
+    if (baseX === undefined && parent.type === 'PAGE') {
+      var c = figma.viewport.center;
+      baseX = Math.round(c.x); baseY = Math.round(c.y);
+    }
+    if (baseX !== undefined) {
+      created.forEach(function (n, k) {
+        var d = data.nodes[k];
+        var dx = d.absX !== undefined && minX !== Infinity ? d.absX - minX : 0;
+        var dy = d.absY !== undefined && minY !== Infinity ? d.absY - minY : 0;
+        n.x = Math.round(baseX + dx);
+        n.y = Math.round(baseY + dy);
+      });
+    }
+    figma.currentPage.selection = created;
+    figma.viewport.scrollAndZoomIntoView(created);
+    return {
+      created: created.map(function (n) { return serialize(n, 0); }),
+      layersCopied: ctx.count,
+      detachedInstances: ctx.detached,
+      missingFonts: Object.keys(ctx.missingFonts),
+      stylesNotLinked: ctx.styleMisses,
+      variablesNotLinked: ctx.varMisses,
+      warnings: ctx.warnings.concat(data.warnings || [])
+    };
   }
 };
+
+// ---------- copiar entre archivos: exportar ----------
+
+var COPY_PROPS = [
+  'visible', 'locked', 'opacity', 'blendMode', 'isMask', 'maskType', 'clipsContent',
+  'strokeWeight', 'strokeAlign', 'strokeCap', 'strokeJoin', 'strokeMiterLimit', 'dashPattern',
+  'strokeTopWeight', 'strokeBottomWeight', 'strokeLeftWeight', 'strokeRightWeight',
+  'cornerRadius', 'cornerSmoothing', 'topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius',
+  'constraints', 'minWidth', 'maxWidth', 'minHeight', 'maxHeight', 'arcData', 'pointCount', 'innerRadius',
+  'effects', 'layoutGrids', 'exportSettings',
+  'layoutMode', 'layoutWrap', 'primaryAxisSizingMode', 'counterAxisSizingMode',
+  'primaryAxisAlignItems', 'counterAxisAlignItems', 'counterAxisAlignContent',
+  'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'itemSpacing', 'counterAxisSpacing',
+  'itemReverseZIndex', 'strokesIncludedInLayout',
+  'layoutAlign', 'layoutGrow', 'layoutPositioning'
+];
+var SIZING_PROPS = ['layoutSizingHorizontal', 'layoutSizingVertical'];
+var TEXT_NODE_PROPS = ['textAlignHorizontal', 'textAlignVertical', 'paragraphSpacing', 'paragraphIndent', 'textTruncation', 'maxLines', 'leadingTrim'];
+var TEXT_SEG_FIELDS = ['fontName', 'fontSize', 'fills', 'letterSpacing', 'lineHeight', 'textDecoration', 'textCase', 'textStyleId', 'fillStyleId'];
+var STYLE_FIELDS = ['fillStyleId', 'strokeStyleId', 'effectStyleId', 'gridStyleId', 'textStyleId'];
+
+function clone(v) { return v === undefined ? undefined : JSON.parse(JSON.stringify(v)); }
+
+// Para comparar rellenos sin que cuenten las referencias a variables
+function samePaints(a, b) {
+  function norm(list) {
+    return JSON.stringify((list || []).map(function (p) {
+      var c = clone(p); delete c.boundVariables; delete c._colorVarKey; return c;
+    }));
+  }
+  if (a === figma.mixed || b === figma.mixed) return false;
+  return norm(a) === norm(b);
+}
+
+async function styleKey(id) {
+  if (!id || id === figma.mixed) return null;
+  try { var s = await figma.getStyleByIdAsync(id); return s ? s.key : null; } catch (e) { return null; }
+}
+
+async function variableKey(alias) {
+  if (!alias || !alias.id) return null;
+  try { var v = await figma.variables.getVariableByIdAsync(alias.id); return v ? v.key : null; } catch (e) { return null; }
+}
+
+async function exportPaints(paints, ctx) {
+  if (!paints || paints === figma.mixed) return undefined;
+  var out = [];
+  for (var i = 0; i < paints.length; i++) {
+    var p = clone(paints[i]);
+    if (p.type === 'IMAGE' && p.imageHash && !ctx.images[p.imageHash]) {
+      try {
+        var img = figma.getImageByHash(p.imageHash);
+        ctx.images[p.imageHash] = figma.base64Encode(await img.getBytesAsync());
+      } catch (e) { ctx.warnings.push('No pude leer una imagen'); }
+    }
+    if (p.boundVariables && p.boundVariables.color) {
+      p._colorVarKey = await variableKey(p.boundVariables.color);
+    }
+    delete p.boundVariables;
+    out.push(p);
+  }
+  return out;
+}
+
+async function exportNode(n, ctx) {
+  ctx.count++;
+  var d = { type: n.type, name: n.name };
+  COPY_PROPS.concat(SIZING_PROPS).forEach(function (k) {
+    if (!(k in n)) return;
+    var v;
+    try { v = n[k]; } catch (e) { return; }
+    if (v === figma.mixed || v === undefined || typeof v === 'symbol') return;
+    d[k] = clone(v);
+  });
+  if ('width' in n) { d.width = n.width; d.height = n.height; }
+  if ('relativeTransform' in n) d.relativeTransform = clone(n.relativeTransform);
+  if ('fills' in n) d.fills = await exportPaints(n.fills, ctx);
+  if ('strokes' in n) d.strokes = await exportPaints(n.strokes, ctx);
+
+  d.styles = {};
+  for (var s = 0; s < STYLE_FIELDS.length; s++) {
+    var f = STYLE_FIELDS[s];
+    if (f in n && n.type !== 'TEXT') { var key = await styleKey(n[f]); if (key) d.styles[f] = key; }
+  }
+  if (n.type === 'TEXT' && n.textStyleId && n.textStyleId !== figma.mixed) {
+    var tk = await styleKey(n.textStyleId); if (tk) d.styles.textStyleId = tk;
+  }
+
+  // Variables ligadas a propiedades numéricas (padding, spacing, radios, tamaños…)
+  d.vars = {};
+  if (n.boundVariables) {
+    var bv = n.boundVariables;
+    for (var field in bv) {
+      if (field === 'fills' || field === 'strokes' || field === 'componentProperties' || field === 'textRangeFills') continue;
+      var alias = bv[field];
+      if (alias && !Array.isArray(alias) && alias.id) {
+        var vk = await variableKey(alias); if (vk) d.vars[field] = vk;
+      }
+    }
+  }
+
+  if (n.type === 'TEXT') {
+    d.characters = n.characters;
+    d.textAutoResize = n.textAutoResize;
+    TEXT_NODE_PROPS.forEach(function (k) { if (k in n && n[k] !== figma.mixed) d[k] = clone(n[k]); });
+    var segs = n.getStyledTextSegments(TEXT_SEG_FIELDS);
+    d.segments = [];
+    for (var g = 0; g < segs.length; g++) {
+      var seg = segs[g];
+      var sd = { start: seg.start, end: seg.end, fontName: seg.fontName, fontSize: seg.fontSize,
+        letterSpacing: seg.letterSpacing, lineHeight: seg.lineHeight, textDecoration: seg.textDecoration, textCase: seg.textCase };
+      sd.fills = await exportPaints(seg.fills, ctx);
+      sd.textStyleKey = await styleKey(seg.textStyleId);
+      sd.fillStyleKey = await styleKey(seg.fillStyleId);
+      d.segments.push(sd);
+    }
+  } else if (n.type === 'VECTOR') {
+    try { d.vectorNetwork = clone(n.vectorNetwork); } catch (e) {}
+    try { d.vectorPaths = clone(n.vectorPaths); } catch (e) {}
+  } else if (n.type === 'BOOLEAN_OPERATION') {
+    // Se reconstruye como SVG (queda como vector editable, sin la operación booleana)
+    try { d.svg = await n.exportAsync({ format: 'SVG_STRING' }); } catch (e) { ctx.warnings.push('No pude copiar la forma ' + n.name); }
+  }
+
+  if (n.type === 'INSTANCE') {
+    var main = await n.getMainComponentAsync();
+    if (main) {
+      d.componentKey = main.key;
+      d.componentName = main.name;
+      d.componentRemote = main.remote;
+    }
+    try {
+      var props = n.componentProperties, values = {};
+      for (var pk in props) if (props[pk].type !== 'INSTANCE_SWAP') values[pk] = props[pk].value;
+      d.componentProps = values;
+    } catch (e) {}
+  }
+
+  if ('children' in n && n.type !== 'BOOLEAN_OPERATION') {
+    d.children = [];
+    for (var c = 0; c < n.children.length; c++) d.children.push(await exportNode(n.children[c], ctx));
+  }
+  return d;
+}
+
+// ---------- copiar entre archivos: reconstruir ----------
+
+async function importPaints(paints, ctx) {
+  if (!paints) return undefined;
+  var out = [];
+  for (var i = 0; i < paints.length; i++) {
+    var p = clone(paints[i]);
+    var varKey = p._colorVarKey;
+    delete p._colorVarKey;
+    if (p.type === 'IMAGE' && p.imageHash) {
+      if (!ctx.imageCache[p.imageHash] && ctx.images[p.imageHash]) {
+        ctx.imageCache[p.imageHash] = figma.createImage(figma.base64Decode(ctx.images[p.imageHash])).hash;
+      }
+      if (ctx.imageCache[p.imageHash]) p.imageHash = ctx.imageCache[p.imageHash];
+    }
+    if (varKey) {
+      try {
+        var v = await figma.variables.importVariableByKeyAsync(varKey);
+        p = figma.variables.setBoundVariableForPaint(p, 'color', v);
+      } catch (e) { ctx.varMisses++; }
+    }
+    out.push(p);
+  }
+  return out;
+}
+
+async function loadFontSafe(font, ctx) {
+  try { await figma.loadFontAsync(font); return font; }
+  catch (e) {
+    ctx.missingFonts[font.family + ' ' + font.style] = true;
+    var fallback = { family: 'Inter', style: /bold/i.test(font.style) ? 'Bold' : 'Regular' };
+    await figma.loadFontAsync(fallback);
+    return fallback;
+  }
+}
+
+function setSafe(node, key, value) {
+  if (value === undefined || !(key in node)) return;
+  try { node[key] = value; } catch (e) {}
+}
+
+async function applyStyle(node, field, key, ctx) {
+  try {
+    var st = await figma.importStyleByKeyAsync(key);
+    var setter = { fillStyleId: 'setFillStyleIdAsync', strokeStyleId: 'setStrokeStyleIdAsync', effectStyleId: 'setEffectStyleIdAsync',
+      gridStyleId: 'setGridStyleIdAsync', textStyleId: 'setTextStyleIdAsync' }[field];
+    if (setter && node[setter]) await node[setter](st.id);
+    else node[field] = st.id;
+  } catch (e) { ctx.styleMisses++; }
+}
+
+async function applyCommon(node, d, ctx, isInstanceChild) {
+  COPY_PROPS.forEach(function (k) {
+    if (k === 'layoutAlign' || k === 'layoutGrow' || k === 'layoutPositioning') return; // se aplican ya dentro del padre
+    if (isInstanceChild && (k === 'layoutMode' || k.indexOf('padding') === 0 || k === 'itemSpacing')) return;
+    setSafe(node, k, d[k]);
+  });
+  if (d.fills && 'fills' in node) { try { node.fills = await importPaints(d.fills, ctx); } catch (e) {} }
+  if (d.strokes && 'strokes' in node) { try { node.strokes = await importPaints(d.strokes, ctx); } catch (e) {} }
+  for (var f in (d.styles || {})) await applyStyle(node, f, d.styles[f], ctx);
+  for (var vf in (d.vars || {})) {
+    try { node.setBoundVariable(vf, await figma.variables.importVariableByKeyAsync(d.vars[vf])); } catch (e) { ctx.varMisses++; }
+  }
+}
+
+async function applyText(node, d, ctx) {
+  var first = d.segments && d.segments[0];
+  node.fontName = await loadFontSafe(first ? first.fontName : { family: 'Inter', style: 'Regular' }, ctx);
+  node.characters = d.characters || '';
+  if (d.textAutoResize) setSafe(node, 'textAutoResize', d.textAutoResize);
+  TEXT_NODE_PROPS.forEach(function (k) { setSafe(node, k, d[k]); });
+  for (var i = 0; i < (d.segments || []).length; i++) {
+    var s = d.segments[i];
+    if (s.end <= s.start || s.end > node.characters.length) continue;
+    try {
+      node.setRangeFontName(s.start, s.end, await loadFontSafe(s.fontName, ctx));
+      if (s.fontSize) node.setRangeFontSize(s.start, s.end, s.fontSize);
+      if (s.letterSpacing) node.setRangeLetterSpacing(s.start, s.end, s.letterSpacing);
+      if (s.lineHeight) node.setRangeLineHeight(s.start, s.end, s.lineHeight);
+      if (s.textDecoration) node.setRangeTextDecoration(s.start, s.end, s.textDecoration);
+      if (s.textCase) node.setRangeTextCase(s.start, s.end, s.textCase);
+      if (s.fills) node.setRangeFills(s.start, s.end, await importPaints(s.fills, ctx));
+      if (s.textStyleKey) {
+        try { var ts = await figma.importStyleByKeyAsync(s.textStyleKey); await node.setRangeTextStyleIdAsync(s.start, s.end, ts.id); }
+        catch (e) { ctx.styleMisses++; }
+      }
+      if (s.fillStyleKey) {
+        try { var fs = await figma.importStyleByKeyAsync(s.fillStyleKey); await node.setRangeFillStyleIdAsync(s.start, s.end, fs.id); }
+        catch (e) { ctx.styleMisses++; }
+      }
+    } catch (e) {}
+  }
+}
+
+function placeInParent(node, d, parent) {
+  var autoParent = parent && 'layoutMode' in parent && parent.layoutMode !== 'NONE';
+  if (autoParent) {
+    setSafe(node, 'layoutPositioning', d.layoutPositioning);
+    setSafe(node, 'layoutAlign', d.layoutAlign);
+    setSafe(node, 'layoutGrow', d.layoutGrow);
+  }
+  if ((!autoParent || d.layoutPositioning === 'ABSOLUTE') && d.relativeTransform) {
+    try { node.relativeTransform = d.relativeTransform; } catch (e) {}
+  }
+  SIZING_PROPS.forEach(function (k) { setSafe(node, k, d[k]); });
+}
+
+// Lleva textos, colores, visibilidad y swaps de una instancia original a la recién creada
+async function applyOverrides(node, d, ctx) {
+  if (!d.children || !('children' in node)) return;
+  var kids = node.children;
+  for (var i = 0; i < d.children.length && i < kids.length; i++) {
+    var cd = d.children[i], kid = kids[i];
+    if (cd.name !== kid.name && cd.type !== kid.type) continue;
+    setSafe(kid, 'visible', cd.visible);
+    if (cd.type === 'INSTANCE' && kid.type === 'INSTANCE' && cd.componentKey) {
+      var km = await kid.getMainComponentAsync();
+      if (km && km.key !== cd.componentKey) {
+        try { kid.swapComponent(await figma.importComponentByKeyAsync(cd.componentKey)); } catch (e) {}
+      }
+      if (cd.componentProps) { try { kid.setProperties(cd.componentProps); } catch (e) {} }
+    }
+    if (cd.fills && 'fills' in kid) {
+      try {
+        if (!samePaints(kid.fills, cd.fills)) kid.fills = await importPaints(cd.fills, ctx);
+      } catch (e) {}
+    }
+    if (cd.type === 'TEXT' && kid.type === 'TEXT' && kid.characters !== cd.characters) {
+      try { await applyText(kid, cd, ctx); } catch (e) {}
+    }
+    await applyOverrides(kid, cd, ctx);
+  }
+}
+
+async function importNode(d, parent, ctx) {
+  ctx.count++;
+  var node = null;
+  var t = d.type;
+
+  if (t === 'GROUP') {
+    var kids = [];
+    for (var g = 0; g < (d.children || []).length; g++) {
+      var k = await importNode(d.children[g], parent, ctx);
+      if (k) kids.push(k);
+    }
+    if (!kids.length) return null;
+    var group = figma.group(kids, parent);
+    group.name = d.name;
+    setSafe(group, 'opacity', d.opacity);
+    setSafe(group, 'visible', d.visible);
+    setSafe(group, 'blendMode', d.blendMode);
+    if (d.effects) setSafe(group, 'effects', d.effects);
+    return group;
+  }
+
+  if (t === 'INSTANCE' && d.componentKey) {
+    try {
+      var comp = await figma.importComponentByKeyAsync(d.componentKey);
+      node = comp.createInstance();
+    } catch (e) {
+      ctx.detached.push(d.componentName || d.name);
+    }
+  }
+
+  if (!node) {
+    if (t === 'RECTANGLE') node = figma.createRectangle();
+    else if (t === 'ELLIPSE') node = figma.createEllipse();
+    else if (t === 'STAR') node = figma.createStar();
+    else if (t === 'POLYGON') node = figma.createPolygon();
+    else if (t === 'LINE') node = figma.createLine();
+    else if (t === 'VECTOR') node = figma.createVector();
+    else if (t === 'TEXT') node = figma.createText();
+    else if (t === 'SECTION') node = figma.createSection();
+    else if (t === 'BOOLEAN_OPERATION' && d.svg) node = figma.createNodeFromSvg(d.svg);
+    else node = figma.createFrame(); // FRAME, COMPONENT, COMPONENT_SET, INSTANCE sin librería
+    if (t === 'FRAME' || t === 'COMPONENT' || t === 'COMPONENT_SET' || t === 'INSTANCE') node.fills = [];
+  }
+
+  parent.appendChild(node);
+  node.name = d.name;
+  var isInstance = node.type === 'INSTANCE';
+
+  if (t === 'TEXT') await applyText(node, d, ctx);
+  if (t === 'VECTOR') {
+    try { await node.setVectorNetworkAsync(d.vectorNetwork); }
+    catch (e) { try { node.vectorPaths = d.vectorPaths; } catch (e2) {} }
+  }
+
+  if (isInstance) {
+    if (d.componentProps) { try { node.setProperties(d.componentProps); } catch (e) {} }
+  } else {
+    if (d.layoutMode) setSafe(node, 'layoutMode', d.layoutMode);
+  }
+
+  var autoResizeText = t === 'TEXT' && d.textAutoResize && d.textAutoResize !== 'NONE';
+  if ('resize' in node && d.width !== undefined && !autoResizeText && t !== 'BOOLEAN_OPERATION') {
+    try { node.resize(Math.max(d.width, 0.01), Math.max(d.height, 0.01)); } catch (e) {}
+  } else if (t === 'TEXT' && d.textAutoResize === 'HEIGHT') {
+    try { node.resize(Math.max(d.width, 1), node.height); } catch (e) {}
+  } else if (t === 'BOOLEAN_OPERATION') {
+    try { node.resize(Math.max(d.width, 0.01), Math.max(d.height, 0.01)); } catch (e) {}
+  }
+
+  if (isInstance) {
+    // Una instancia trae su propio contenido: solo se aplican los cambios que tenía el original
+    setSafe(node, 'visible', d.visible);
+    setSafe(node, 'opacity', d.opacity);
+    if (d.fills) { try { if (!samePaints(node.fills, d.fills)) node.fills = await importPaints(d.fills, ctx); } catch (e) {} }
+    await applyOverrides(node, d, ctx);
+  } else {
+    await applyCommon(node, d, ctx, false);
+    if (t !== 'BOOLEAN_OPERATION' && d.children && 'appendChild' in node) {
+      for (var c = 0; c < d.children.length; c++) await importNode(d.children[c], node, ctx);
+    }
+    // Re-aplicar modos de tamaño una vez que hay hijos (HUG/FIXED)
+    setSafe(node, 'primaryAxisSizingMode', d.primaryAxisSizingMode);
+    setSafe(node, 'counterAxisSizingMode', d.counterAxisSizingMode);
+  }
+
+  placeInParent(node, d, parent);
+  return node;
+}
 
 figma.ui.onmessage = async function (msg) {
   if (msg && msg.type === 'status') { onStatus(msg.state); return; }

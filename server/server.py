@@ -213,6 +213,25 @@ FILE_PARAM = {
 for _t in TOOLS:
     _t["inputSchema"]["properties"]["file"] = FILE_PARAM
 
+TOOLS.append({
+    "name": "copy_nodes",
+    "description": (
+        "Copia capas de un archivo de Figma a otro (Figma no deja copiar entre archivos desde un plugin, así que "
+        "se leen completas en el origen y se reconstruyen en el destino). Conserva frames, auto layout, textos con "
+        "estilos, colores, imágenes, efectos, y las instancias/estilos/variables de librerías publicadas. Los "
+        "componentes locales del origen llegan como frames. Los datos van de archivo a archivo sin pasar por Claude. "
+        "Ambos archivos deben tener Bifrost conectado (list_files)."
+    ),
+    "inputSchema": schema({
+        "from": {"type": "string", "description": "Archivo de origen (parte del nombre)"},
+        "to": {"type": "string", "description": "Archivo de destino (parte del nombre)"},
+        "nodeIds": {"type": "array", "items": {"type": "string"}, "description": "Nodos a copiar; si se omite, la selección del origen"},
+        "nextToId": {"type": "string", "description": "Pegar a la derecha de este nodo del destino"},
+        "gap": {"type": "number", "description": "Separación con nextToId (default 200)"},
+        "x": {"type": "number"}, "y": {"type": "number"},
+        "parentId": {"type": "string", "description": "Frame del destino donde pegarlo (default: página actual)"},
+    }, ["from", "to"]),
+})
 TOOLS.insert(0, {
     "name": "list_files",
     "description": "Lista los archivos de Figma conectados al puente y cuál está activo (el último donde el usuario trabajó).",
@@ -439,7 +458,8 @@ class Bridge:
                 return ("lancé el atajo pero el plugin no respondió; puede que el último plugin que usaste "
                         "en Figma no sea Bifrost")
 
-    async def call(self, command, params):
+    async def call(self, command, params, timeout=None):
+        timeout = timeout or TIMEOUT
         if not self.listening:
             raise RuntimeError(
                 f"Otra sesión de Claude (Code o Chat) está usando el puente de Figma (puerto {PORT}). "
@@ -459,10 +479,10 @@ class Bridge:
         self.pending[req_id] = fut
         await session.conn.send_text(json.dumps({"id": req_id, "command": command, "params": params}))
         try:
-            msg = await asyncio.wait_for(fut, TIMEOUT)
+            msg = await asyncio.wait_for(fut, timeout)
         except asyncio.TimeoutError:
             self.pending.pop(req_id, None)
-            raise RuntimeError(f"Figma ({session.file_name}) no respondió en {TIMEOUT:.0f}s")
+            raise RuntimeError(f"Figma ({session.file_name}) no respondió en {timeout:.0f}s")
         if "error" in msg:
             raise RuntimeError(f"[{session.file_name}] {msg['error']}")
         return session.file_name, msg.get("result")
@@ -491,6 +511,22 @@ def reply(req_id, result=None, error=None):
     send(msg)
 
 
+async def handle_copy(bridge, req_id, args):
+    """Origen -> export_nodes, destino -> import_nodes. El JSON nunca sale del servidor."""
+    try:
+        src_name, data = await bridge.call(
+            "export_nodes", {"file": args.get("from"), "nodeIds": args.get("nodeIds")}, timeout=180)
+        dest_params = {k: args[k] for k in ("nextToId", "gap", "x", "y", "parentId") if k in args}
+        dest_params["file"] = args.get("to")
+        dest_params["data"] = data
+        dst_name, result = await bridge.call("import_nodes", dest_params, timeout=300)
+    except Exception as e:
+        reply(req_id, {"content": [{"type": "text", "text": f"Error: {e}"}], "isError": True})
+        return
+    summary = {"from": src_name, "to": dst_name, **(result or {})}
+    reply(req_id, {"content": [{"type": "text", "text": json.dumps(summary, ensure_ascii=False, indent=2)}]})
+
+
 async def handle_tool_call(bridge, req_id, params):
     name = params.get("name")
     args = params.get("arguments") or {}
@@ -503,6 +539,9 @@ async def handle_tool_call(bridge, req_id, params):
             await bridge.auto_launch()
             files = bridge.list_files()
         reply(req_id, {"content": [{"type": "text", "text": json.dumps(files, ensure_ascii=False, indent=2)}]})
+        return
+    if name == "copy_nodes":
+        await handle_copy(bridge, req_id, dict(args))
         return
     try:
         file_name, result = await bridge.call(name, dict(args))
