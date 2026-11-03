@@ -72,6 +72,7 @@ Every tool accepts an optional `file` argument to target a specific connected fi
 - **"El plugin de Figma no está conectado"**: run Bifrost in Figma.
 - **The status dot stays yellow**: Claude isn't running the server. Re-run `install.command` and restart Claude.
 - **"Otra sesión de Claude… con una versión vieja de Bifrost"**: a session started before you updated Bifrost owns the bridge and can't share it. Close or restart it, and this one takes over within a few seconds.
+- **"Bifrost está desactualizado en este archivo"**: that tab is running an older copy of the plugin. Close it and run Bifrost again in that tab.
 - **Font errors in `create_text`**: the font and style must exist in Figma. For example, use `"Bold"`, not `"bold"`.
 
 ## License

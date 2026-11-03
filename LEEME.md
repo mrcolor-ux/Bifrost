@@ -77,5 +77,6 @@ Figma no deja que un plugin corra sin que lo lances, así que se apaga si cambia
 - **“El plugin de Figma no está conectado”**: abre el plugin en Figma. Si ya estaba abierto, pulsa Conectar.
 - **El punto se queda amarillo**: Claude no tiene el servidor corriendo. Revisa el paso 2 y reinicia la sesión.
 - **“Otra sesión de Claude… con una versión vieja de Bifrost”**: una sesión que arrancó antes de actualizar Bifrost tiene el puente y no sabe compartirlo. Ciérrala (o reiníciala) y en unos segundos esta toma la conexión.
+- **“Bifrost está desactualizado en este archivo”**: esa pestaña trae una versión vieja del plugin. Ciérralo y vuelve a abrirlo en esa pestaña.
 - **Error de fuente en `create_text`**: la fuente tiene que estar instalada o disponible en Figma, y el estilo tiene que existir. Por ejemplo, `"Bold"` y no `"bold"`.
 - **Cambiar el puerto**: define la variable de entorno `FIGMA_BRIDGE_PORT` en el servidor, cámbialo en la ventana del plugin y actualiza `allowedDomains` en `manifest.json`.

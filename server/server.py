@@ -21,6 +21,8 @@ import uuid
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("FIGMA_BRIDGE_PORT", "3055"))
 TIMEOUT = float(os.environ.get("FIGMA_BRIDGE_TIMEOUT", "60"))
+# Versión del plugin que espera este servidor (BIFROST_VERSION en code.js; los plugins viejos no la mandan)
+PLUGIN_VERSION = 2
 # Si no hay plugin conectado, correr Bifrost desde el menú Plugins de Figma para encenderlo solo
 AUTOLAUNCH = os.environ.get("FIGMA_BRIDGE_AUTOLAUNCH", "1") != "0"
 # Archivos ya vistos (key -> nombre), para abrir su pestaña y conectarlos solos
@@ -364,7 +366,17 @@ class FileSession:
         self.file_name = "?"
         self.file_key = None
         self.page = None
+        self.version = 1
         self.last_active = time.monotonic()
+
+    @property
+    def outdated(self):
+        return self.version < PLUGIN_VERSION
+
+    def outdated_hint(self):
+        return (f"La pestaña '{self.file_name}' trae una versión vieja del plugin de Bifrost. "
+                "Ciérralo y vuelve a abrirlo en esa pestaña (Plugins > Bifrost > Conectar a Claude); "
+                "si lo usas desde Community, publica primero la versión nueva.")
 
 
 class Bridge:
@@ -604,7 +616,10 @@ class Bridge:
                 session.page = msg["page"]
             session.last_active = time.monotonic()
             if kind == "hello":
-                log("Conectado:", session.file_name)
+                session.version = int(msg.get("version") or 1)
+                log("Conectado:", session.file_name, "(plugin viejo)" if session.outdated else "")
+                if session.outdated:
+                    asyncio.ensure_future(self.warn_outdated(session))
                 # Si acabamos de abrir una pestaña por su key, este es ese archivo
                 if not session.file_key and self.awaiting_key:
                     session.file_key = self.awaiting_key
@@ -620,6 +635,14 @@ class Bridge:
         if fut and not fut.done():
             fut.set_result(msg)
 
+    async def warn_outdated(self, session):
+        """Aviso en Figma; la respuesta del plugin no se espera."""
+        try:
+            await session.conn.send_text(json.dumps({"id": uuid.uuid4().hex, "command": "notify", "params": {
+                "message": "⚠️ Bifrost está desactualizado en este archivo. Ciérralo y vuelve a abrirlo."}}))
+        except (ConnectionError, OSError):
+            pass
+
     def ready_files(self):
         return [f for f in self.files if f.file_name != "?"]
 
@@ -630,6 +653,7 @@ class Bridge:
             "page": f.page,
             "active": f is active,
             "lastActiveSecondsAgo": round(time.monotonic() - f.last_active),
+            **({"pluginViejo": True} if f.outdated else {}),
         } for f in sorted(self.ready_files(), key=lambda f: -f.last_active)]
         names = {f.file_name for f in self.ready_files()}
         others = sorted(set(n for n in self.candidates().values() if n not in names))
@@ -792,7 +816,10 @@ class Bridge:
             self.pending.pop(req_id, None)
             raise RuntimeError(f"Figma ({session.file_name}) no respondió en {timeout:.0f}s")
         if "error" in msg:
-            raise RuntimeError(f"[{session.file_name}] {msg['error']}")
+            err = f"[{session.file_name}] {msg['error']}"
+            if session.outdated:
+                err += ". " + session.outdated_hint()
+            raise RuntimeError(err)
         return session.file_name, msg.get("result")
 
 

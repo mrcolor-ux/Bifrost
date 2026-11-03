@@ -52,3 +52,7 @@
 - **No uses el logo de Claude ni de Anthropic** en el icono ni en la portada. Decir "for Claude" para describir con qué funciona está bien; por eso viene el aviso de *not affiliated*.
 - **Actualizaciones:** cada vez que cambies `code.js`, `ui.html` o `manifest.json`, vuelve a publicar desde **Manage plugins → Bifrost → Publish new version**. Los cambios en `server.py` solo necesitan subirse a GitHub.
 - **El menú del plugin está en español** ("Conectar a Claude", "Mostrar panel"). Si quieres llegar a más gente, lo puedo pasar a inglés o hacerlo bilingüe.
+
+## Publicar una versión nueva
+
+Si cambiaste comandos del plugin, sube `BIFROST_VERSION` en `figma-plugin/code.js` y `PLUGIN_VERSION` en `server/server.py` al mismo número antes de publicar. Así el servidor avisa en las pestañas que sigan con la versión anterior.

@@ -3,12 +3,16 @@
 // Por default corre oculto: la UI (que tiene el WebSocket) vive en un iframe invisible.
 // "Mostrar panel" la abre visible para ver el log.
 
+// Súbelo junto con PLUGIN_VERSION de server.py cuando agregues o cambies comandos,
+// para que el servidor avise si una pestaña trae una versión vieja.
+var BIFROST_VERSION = 2;
+
 if (figma.command === 'disconnect') {
   figma.closePlugin('Claude desconectado');
 } else {
   var showPanel = figma.command === 'panel';
   figma.showUI(__html__, { width: 300, height: 250, title: 'Bifrost', visible: showPanel });
-  figma.ui.postMessage({ type: 'init', fileName: figma.root.name, fileKey: figma.fileKey, page: figma.currentPage.name });
+  figma.ui.postMessage({ type: 'init', fileName: figma.root.name, fileKey: figma.fileKey, page: figma.currentPage.name, version: BIFROST_VERSION });
   // Avisa al servidor cuando trabajas en este archivo, para que Claude sepa cuál es el activo
   var reportActive = function () {
     figma.ui.postMessage({ type: 'active', fileName: figma.root.name, page: figma.currentPage.name });

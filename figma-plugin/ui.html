@@ -60,7 +60,7 @@
     ws.onopen = function () {
       setStatus('on', 'Conectado con Claude');
       log('Conectado');
-      ws.send(JSON.stringify({ type: 'hello', fileName: fileInfo.fileName, fileKey: fileInfo.fileKey, page: fileInfo.page }));
+      ws.send(JSON.stringify({ type: 'hello', fileName: fileInfo.fileName, fileKey: fileInfo.fileKey, page: fileInfo.page, version: fileInfo.version }));
     };
     ws.onmessage = function (ev) {
       var msg;
