@@ -1,0 +1,21 @@
+{
+  "name": "Bifrost",
+  "id": "claude-bridge-local-dev",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma", "figjam"],
+  "documentAccess": "dynamic-page",
+  "menu": [
+    { "name": "Conectar a Claude (en segundo plano)", "command": "connect" },
+    { "name": "Mostrar panel", "command": "panel" },
+    { "name": "Desconectar", "command": "disconnect" }
+  ],
+  "relaunchButtons": [
+    { "command": "connect", "name": "Conectar Claude" }
+  ],
+  "networkAccess": {
+    "allowedDomains": ["ws://localhost:3055", "http://localhost:3055"],
+    "reasoning": "Bifrost only talks to a local server running on the user's own computer (localhost:3055), which relays commands from the Claude desktop app. No data is sent to any remote server by the plugin."
+  }
+}

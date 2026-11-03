@@ -1,0 +1,80 @@
+# Bifrost · puente Claude ↔ Figma
+
+Conecta Claude con Figma sin el conector oficial. Funciona con cualquier plan de Figma.
+
+```
+Claude  ──(MCP / stdio)──►  server/server.py  ──(WebSocket :3055)──►  Plugin "Bifrost" en Figma
+```
+
+No hay que instalar nada: el servidor usa solo Python 3, que ya viene en la Mac.
+
+## 1. Instalar el plugin en Figma (una sola vez)
+
+1. Abre la **app de escritorio de Figma**. Los plugins de desarrollo no se pueden importar desde el navegador.
+2. Abre cualquier archivo de diseño.
+3. Menú **Plugins → Development → Import plugin from manifest…**
+4. Elige `figma-plugin/manifest.json` de esta carpeta.
+
+## 2. Registrar el servidor en Claude (una sola vez)
+
+Lo más fácil es darle **doble clic a `install.command`**: registra Bifrost en Claude Code y en el Chat de la app de escritorio, y hace respaldo de tu configuración antes.
+
+Si prefieres hacerlo a mano, agrega esto en `~/.claude.json`, dentro de `"mcpServers"`, con la ruta real de esta carpeta:
+
+```json
+"bifrost": {
+  "type": "stdio",
+  "command": "/usr/bin/python3",
+  "args": ["/RUTA/A/claude-figma-bridge/server/server.py"]
+}
+```
+
+Si tienes el CLI de `claude`, también lo puedes registrar así:
+
+```bash
+claude mcp add --scope user bifrost -- /usr/bin/python3 /RUTA/A/claude-figma-bridge/server/server.py
+```
+
+Después reinicia la sesión de Claude.
+
+## 3. Usarlo
+
+1. En Figma: **Plugins → Development → Bifrost → Conectar a Claude (en segundo plano)**.
+   No se abre ninguna ventana; solo sale el aviso “🟢 Claude conectado”.
+2. Pídele cosas a Claude: “¿qué tengo seleccionado?”, “crea un banner de 1080×1080 con fondo naranja y el texto…”, “exporta este frame para que lo veas”.
+
+**Se enciende solo.** Si le pides algo a Claude y no hay ningún archivo conectado, el servidor pone Figma al frente y presiona **Cmd+Option+P** (*Run last plugin*). Para que esto funcione:
+- macOS tiene que darle permiso a la app de Claude: **Ajustes del Sistema → Privacidad y seguridad → Accesibilidad → Claude ✓**.
+- El último plugin que usaste en Figma tiene que haber sido Bifrost.
+- Para desactivarlo, pon `FIGMA_BRIDGE_AUTOLAUNCH=0` en el `env` del servidor.
+
+**Varios archivos a la vez.** Cada archivo donde corre el plugin queda conectado. Por default, Claude trabaja en el último archivo donde hiciste algo (seleccionar o cambiar de página). También le puedes pedir un archivo en particular, por ejemplo: “trae el componente X del DS y ponlo en el flujo”. La herramienta `list_files` muestra cuáles están conectados.
+
+**Atajos**
+- **Cmd+Option+P** vuelve a correr el último plugin, así que reconecta en un segundo.
+- Después de la primera vez, el archivo muestra un botón **“Conectar Claude”** en el panel derecho, cuando no tienes nada seleccionado.
+- **Mostrar panel** abre la ventanita con el log, por si quieres ver qué está haciendo Claude.
+- **Desconectar**, o el botón del aviso, apaga el puente.
+
+Figma no deja que un plugin corra sin que lo lances, así que se apaga si cambias de archivo o recargas, y hay que volver a lanzarlo. Todo lo que hace Claude se puede deshacer con **Cmd+Z**.
+
+## Herramientas
+
+| Herramienta | Qué hace |
+|---|---|
+| `get_document_info`, `get_selection`, `get_node_info`, `find_nodes` | Leer el archivo, la selección o un nodo, y buscar nodos |
+| `set_current_page`, `select_nodes` | Cambiar de página y seleccionar o hacer zoom |
+| `create_frame`, `create_rectangle`, `create_ellipse`, `create_text` | Crear elementos |
+| `set_text`, `set_fill`, `set_stroke`, `set_corner_radius`, `set_auto_layout` | Editar estilos |
+| `move_node`, `resize_node`, `rename_node`, `clone_node`, `delete_node` | Mover, redimensionar, renombrar, duplicar y borrar |
+| `export_image` | Exportar a PNG, JPG o SVG para que Claude vea el diseño |
+| `run_code` | Ejecutar JavaScript con la API completa de Figma (componentes, variables, efectos…) |
+| `notify` | Mostrar un aviso en Figma |
+
+## Problemas comunes
+
+- **“El plugin de Figma no está conectado”**: abre el plugin en Figma. Si ya estaba abierto, pulsa Conectar.
+- **El punto se queda amarillo**: Claude no tiene el servidor corriendo. Revisa el paso 2 y reinicia la sesión.
+- **“Otra sesión de Claude… está usando el puente”**: hay dos sesiones de Claude abiertas. Cierra una y en unos segundos la otra toma la conexión.
+- **Error de fuente en `create_text`**: la fuente tiene que estar instalada o disponible en Figma, y el estilo tiene que existir. Por ejemplo, `"Bold"` y no `"bold"`.
+- **Cambiar el puerto**: define la variable de entorno `FIGMA_BRIDGE_PORT` en el servidor, cámbialo en la ventana del plugin y actualiza `allowedDomains` en `manifest.json`.
