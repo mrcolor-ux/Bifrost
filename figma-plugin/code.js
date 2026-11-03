@@ -61,28 +61,36 @@ function toHex(c) {
 function describePaints(paints) {
   if (!paints || paints === figma.mixed || !paints.length) return undefined;
   return paints.map(function (p) {
-    if (p.type === 'SOLID') return { type: 'SOLID', color: toHex(p.color), opacity: p.opacity };
-    return { type: p.type };
+    if (p.type === 'SOLID') {
+      var hex = toHex(p.color);
+      return p.opacity !== undefined && p.opacity < 1 ? hex + ' ' + Math.round(p.opacity * 100) + '%' : hex;
+    }
+    return p.type;
   });
 }
+
+function r1(v) { return Math.round(v * 10) / 10; }
+
+// Respuesta mínima para acciones de edición
+function brief(n) { return { ok: true, id: n.id, name: n.name }; }
 
 function serialize(node, depth) {
   if (depth === undefined) depth = 1;
   var out = { id: node.id, name: node.name, type: node.type };
-  if ('x' in node) { out.x = node.x; out.y = node.y; }
-  if ('width' in node) { out.width = node.width; out.height = node.height; }
+  if ('x' in node) { out.x = r1(node.x); out.y = r1(node.y); }
+  if ('width' in node) { out.w = r1(node.width); out.h = r1(node.height); }
   if ('visible' in node && !node.visible) out.visible = false;
   if ('fills' in node) { var f = describePaints(node.fills); if (f) out.fills = f; }
   if ('strokes' in node) { var s = describePaints(node.strokes); if (s) out.strokes = s; }
   if ('cornerRadius' in node && node.cornerRadius && node.cornerRadius !== figma.mixed) out.cornerRadius = node.cornerRadius;
   if ('layoutMode' in node && node.layoutMode !== 'NONE') {
-    out.layout = { mode: node.layoutMode, spacing: node.itemSpacing,
-      padding: [node.paddingTop, node.paddingRight, node.paddingBottom, node.paddingLeft] };
+    out.layout = node.layoutMode + ' gap ' + node.itemSpacing + ' pad ' +
+      [node.paddingTop, node.paddingRight, node.paddingBottom, node.paddingLeft].join(',');
   }
   if (node.type === 'TEXT') {
     out.characters = node.characters;
     if (node.fontSize !== figma.mixed) out.fontSize = node.fontSize;
-    if (node.fontName !== figma.mixed) out.fontName = node.fontName;
+    if (node.fontName !== figma.mixed) out.font = node.fontName.family + ' ' + node.fontName.style;
   }
   if ('children' in node) {
     if (depth > 0) out.children = node.children.map(function (c) { return serialize(c, depth - 1); });
@@ -130,14 +138,16 @@ async function loadFontsOf(textNode) {
 // ---------- comandos ----------
 
 var commands = {
-  get_document_info: async function () {
-    return {
+  get_document_info: async function (p) {
+    var out = {
       fileName: figma.root.name,
-      editorType: figma.editorType,
       currentPage: { id: figma.currentPage.id, name: figma.currentPage.name },
-      pages: figma.root.children.map(function (p) { return { id: p.id, name: p.name }; }),
-      topLevelNodes: figma.currentPage.children.map(function (c) { return serialize(c, 0); })
+      pageCount: figma.root.children.length,
+      topLevelNodes: figma.currentPage.children.slice(0, p.limit || 60).map(function (c) { return serialize(c, 0); })
     };
+    if (figma.currentPage.children.length > (p.limit || 60)) out.moreNodes = figma.currentPage.children.length - (p.limit || 60);
+    if (p.allPages) out.pages = figma.root.children.map(function (pg) { return { id: pg.id, name: pg.name }; });
+    return out;
   },
 
   get_selection: async function (p) {
@@ -146,7 +156,7 @@ var commands = {
   },
 
   get_node_info: async function (p) {
-    return serialize(await getNode(p.nodeId), p.depth === undefined ? 2 : p.depth);
+    return serialize(await getNode(p.nodeId), p.depth === undefined ? 1 : p.depth);
   },
 
   find_nodes: async function (p) {
@@ -220,14 +230,14 @@ var commands = {
     }
     n.characters = String(p.text);
     if (p.fontSize) n.fontSize = p.fontSize;
-    return serialize(n, 0);
+    return brief(n);
   },
 
   set_fill: async function (p) {
     var n = await getNode(p.nodeId);
     if (!('fills' in n)) throw new Error('Ese nodo no tiene rellenos');
     n.fills = solid(p.color);
-    return serialize(n, 0);
+    return brief(n);
   },
 
   set_stroke: async function (p) {
@@ -235,14 +245,14 @@ var commands = {
     if (!('strokes' in n)) throw new Error('Ese nodo no tiene bordes');
     n.strokes = solid(p.color);
     if (p.weight !== undefined) n.strokeWeight = p.weight;
-    return serialize(n, 0);
+    return brief(n);
   },
 
   set_corner_radius: async function (p) {
     var n = await getNode(p.nodeId);
     if (!('cornerRadius' in n)) throw new Error('Ese nodo no tiene esquinas');
     n.cornerRadius = p.radius;
-    return serialize(n, 0);
+    return brief(n);
   },
 
   set_auto_layout: async function (p) {
@@ -261,7 +271,7 @@ var commands = {
       n.primaryAxisSizingMode = p.hug ? 'AUTO' : 'FIXED';
       n.counterAxisSizingMode = p.hug ? 'AUTO' : 'FIXED';
     }
-    return serialize(n, 0);
+    return brief(n);
   },
 
   move_node: async function (p) {
@@ -269,20 +279,20 @@ var commands = {
     if (p.parentId) (await getParent(p.parentId)).appendChild(n);
     if (p.x !== undefined) n.x = p.x;
     if (p.y !== undefined) n.y = p.y;
-    return serialize(n, 0);
+    return brief(n);
   },
 
   resize_node: async function (p) {
     var n = await getNode(p.nodeId);
     if (!('resize' in n)) throw new Error('Ese nodo no se puede redimensionar');
     n.resize(p.width, p.height);
-    return serialize(n, 0);
+    return brief(n);
   },
 
   rename_node: async function (p) {
     var n = await getNode(p.nodeId);
     n.name = p.name;
-    return serialize(n, 0);
+    return brief(n);
   },
 
   clone_node: async function (p) {
@@ -312,9 +322,11 @@ var commands = {
     var n = await getNode(p.nodeId);
     if (!('exportAsync' in n)) throw new Error('Ese nodo no se puede exportar');
     var format = p.format || 'PNG';
+    var maxSide = Math.max(n.width, n.height) || 1;
+    var scale = Math.min(p.scale || 1, (p.maxSize || 800) / maxSide);
     var settings = format === 'SVG'
       ? { format: 'SVG' }
-      : { format: format, constraint: { type: 'SCALE', value: p.scale || 1 } };
+      : { format: format, constraint: { type: 'SCALE', value: Math.max(scale, 0.01) } };
     var bytes = await n.exportAsync(settings);
     return { format: format, base64: figma.base64Encode(bytes) };
   },

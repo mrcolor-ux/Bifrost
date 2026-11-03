@@ -45,8 +45,8 @@ def schema(props=None, required=None):
 TOOLS = [
     {
         "name": "get_document_info",
-        "description": "Info del archivo abierto: nombre, páginas y nodos de primer nivel de la página actual.",
-        "inputSchema": schema(),
+        "description": "Info del archivo abierto: nombre, página actual y sus nodos de primer nivel. allPages=true para listar todas las páginas.",
+        "inputSchema": schema({"allPages": {"type": "boolean"}, "limit": {"type": "number", "description": "Máx. nodos (default 60)"}}),
     },
     {
         "name": "get_selection",
@@ -56,7 +56,7 @@ TOOLS = [
     {
         "name": "get_node_info",
         "description": "Detalle de un nodo (posición, tamaño, rellenos, texto, hijos).",
-        "inputSchema": schema({"nodeId": NODE_ID, "depth": {"type": "number", "description": "Niveles de hijos (default 2)"}}, ["nodeId"]),
+        "inputSchema": schema({"nodeId": NODE_ID, "depth": {"type": "number", "description": "Niveles de hijos (default 1)"}}, ["nodeId"]),
     },
     {
         "name": "find_nodes",
@@ -188,6 +188,7 @@ TOOLS = [
             "nodeId": NODE_ID,
             "format": {"type": "string", "enum": ["PNG", "JPG", "SVG"], "description": "Default PNG"},
             "scale": {"type": "number", "description": "Default 1"},
+            "maxSize": {"type": "number", "description": "Lado mayor máximo en px (default 800, para ahorrar tokens)"},
         }, ["nodeId"]),
     },
     {
@@ -524,7 +525,7 @@ async def handle_copy(bridge, req_id, args):
         reply(req_id, {"content": [{"type": "text", "text": f"Error: {e}"}], "isError": True})
         return
     summary = {"from": src_name, "to": dst_name, **(result or {})}
-    reply(req_id, {"content": [{"type": "text", "text": json.dumps(summary, ensure_ascii=False, indent=2)}]})
+    reply(req_id, {"content": [{"type": "text", "text": json.dumps(summary, ensure_ascii=False, separators=(',', ':'))}]})
 
 
 async def handle_tool_call(bridge, req_id, params):
@@ -538,7 +539,7 @@ async def handle_tool_call(bridge, req_id, params):
         if not files and bridge.listening:
             await bridge.auto_launch()
             files = bridge.list_files()
-        reply(req_id, {"content": [{"type": "text", "text": json.dumps(files, ensure_ascii=False, indent=2)}]})
+        reply(req_id, {"content": [{"type": "text", "text": json.dumps(files, ensure_ascii=False, separators=(',', ':'))}]})
         return
     if name == "copy_nodes":
         await handle_copy(bridge, req_id, dict(args))
@@ -557,7 +558,7 @@ async def handle_tool_call(bridge, req_id, params):
             mime = "image/jpeg" if fmt == "JPG" else "image/png"
             content = [{"type": "image", "data": result["base64"], "mimeType": mime}]
     else:
-        content = [{"type": "text", "text": json.dumps(result, ensure_ascii=False, indent=2)}]
+        content = [{"type": "text", "text": json.dumps(result, ensure_ascii=False, separators=(',', ':'))}]
     content.insert(0, {"type": "text", "text": f"[Archivo: {file_name}]"})
     reply(req_id, {"content": content})
 
