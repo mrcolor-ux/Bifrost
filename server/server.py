@@ -11,6 +11,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import struct
 import sys
 import threading
@@ -22,6 +23,28 @@ PORT = int(os.environ.get("FIGMA_BRIDGE_PORT", "3055"))
 TIMEOUT = float(os.environ.get("FIGMA_BRIDGE_TIMEOUT", "60"))
 # Si no hay plugin conectado, mandar Cmd+Option+P a Figma para encenderlo solo
 AUTOLAUNCH = os.environ.get("FIGMA_BRIDGE_AUTOLAUNCH", "1") != "0"
+# Archivos ya vistos (key -> nombre), para abrir su pestaña y conectarlos solos
+KNOWN_FILES_PATH = os.path.expanduser(os.environ.get("FIGMA_BRIDGE_FILES", "~/.bifrost/files.json"))
+FIGMA_URL_RE = re.compile(r"figma\.com/(?:design|file|board|proto|slides)/([A-Za-z0-9]+)")
+# La app de escritorio guarda aquí sus pestañas abiertas (título + key)
+FIGMA_SETTINGS_PATH = os.path.expanduser("~/Library/Application Support/Figma/settings.json")
+TAB_PATH_RE = re.compile(r"^/(?:file|design|board|proto|slides)/([A-Za-z0-9]+)")
+
+
+def figma_open_tabs():
+    """key -> título de las pestañas abiertas en Figma de escritorio."""
+    try:
+        with open(FIGMA_SETTINGS_PATH, encoding="utf-8") as f:
+            windows = json.load(f).get("windows") or []
+    except (OSError, ValueError, AttributeError):
+        return {}
+    tabs = {}
+    for w in windows:
+        for t in (w.get("tabs") or []) if isinstance(w, dict) else []:
+            m = TAB_PATH_RE.match(str(t.get("path", "")))
+            if m and t.get("title"):
+                tabs[m.group(1)] = t["title"]
+    return tabs
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
@@ -209,7 +232,11 @@ TOOLS = [
 ]
 FILE_PARAM = {
     "type": "string",
-    "description": "Archivo de Figma (nombre o parte del nombre). Si se omite, el último donde el usuario trabajó. Ver list_files.",
+    "description": (
+        "Archivo de Figma (nombre o parte del nombre, o su link de figma.com). Si se omite, el último donde el "
+        "usuario trabajó. Si no está conectado pero ya se conoce (o pasas el link), Bifrost abre su pestaña y se "
+        "conecta solo. Ver list_files."
+    ),
 }
 for _t in TOOLS:
     _t["inputSchema"]["properties"]["file"] = FILE_PARAM
@@ -224,8 +251,8 @@ TOOLS.append({
         "Ambos archivos deben tener Bifrost conectado (list_files)."
     ),
     "inputSchema": schema({
-        "from": {"type": "string", "description": "Archivo de origen (parte del nombre)"},
-        "to": {"type": "string", "description": "Archivo de destino (parte del nombre)"},
+        "from": {"type": "string", "description": "Archivo de origen (parte del nombre o link)"},
+        "to": {"type": "string", "description": "Archivo de destino (parte del nombre o link)"},
         "nodeIds": {"type": "array", "items": {"type": "string"}, "description": "Nodos a copiar; si se omite, la selección del origen"},
         "nextToId": {"type": "string", "description": "Pegar a la derecha de este nodo del destino"},
         "gap": {"type": "number", "description": "Separación con nextToId (default 200)"},
@@ -235,7 +262,10 @@ TOOLS.append({
 })
 TOOLS.insert(0, {
     "name": "list_files",
-    "description": "Lista los archivos de Figma conectados al puente y cuál está activo (el último donde el usuario trabajó).",
+    "description": (
+        "Lista los archivos de Figma conectados al puente y cuál está activo (el último donde el usuario trabajó), "
+        "y los que Bifrost ya conoce y puede abrir y conectar solo."
+    ),
     "inputSchema": schema(),
 })
 TOOL_NAMES = {t["name"] for t in TOOLS}
@@ -320,6 +350,28 @@ class Bridge:
         self.listening = False
         self.connected = asyncio.Event()
         self.launch_lock = asyncio.Lock()
+        self.known = self.load_known()  # key -> nombre del archivo
+        self.awaiting_key = None        # key de la pestaña que se está abriendo
+
+    @staticmethod
+    def load_known():
+        try:
+            with open(KNOWN_FILES_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def remember(self, key, name):
+        if not key or not name or name == "?" or self.known.get(key) == name:
+            return
+        self.known[key] = name
+        try:
+            os.makedirs(os.path.dirname(KNOWN_FILES_PATH), exist_ok=True)
+            with open(KNOWN_FILES_PATH, "w", encoding="utf-8") as f:
+                json.dump(self.known, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            log("No pude guardar", KNOWN_FILES_PATH, e)
 
     async def serve_forever(self):
         """Abre el puerto; si otra sesión lo tiene ocupado, reintenta hasta que se libere."""
@@ -398,6 +450,15 @@ class Bridge:
             session.last_active = time.monotonic()
             if kind == "hello":
                 log("Conectado:", session.file_name)
+                # Si acabamos de abrir una pestaña por su key, este es ese archivo
+                if not session.file_key and self.awaiting_key:
+                    session.file_key = self.awaiting_key
+                    self.awaiting_key = None
+                if not session.file_key:
+                    same = [k for k, n in figma_open_tabs().items() if n == session.file_name]
+                    if len(same) == 1:
+                        session.file_key = same[0]
+                self.remember(session.file_key, session.file_name)
                 self.connected.set()
             return
         fut = self.pending.pop(msg.get("id"), None)
@@ -409,25 +470,98 @@ class Bridge:
 
     def list_files(self):
         active = self.pick(None) if self.ready_files() else None
-        return [{
+        connected = [{
             "file": f.file_name,
             "page": f.page,
             "active": f is active,
             "lastActiveSecondsAgo": round(time.monotonic() - f.last_active),
         } for f in sorted(self.ready_files(), key=lambda f: -f.last_active)]
+        names = {f.file_name for f in self.ready_files()}
+        others = sorted(set(n for n in self.candidates().values() if n not in names))
+        if not others:
+            return connected
+        return {"connected": connected, "canAutoConnect": others}
+
+    def match(self, file_query):
+        """Archivos conectados que coinciden con el nombre o link pedido."""
+        files = self.ready_files()
+        q = str(file_query)
+        url = FIGMA_URL_RE.search(q)
+        if url:
+            key = url.group(1)
+            name = self.candidates().get(key)
+            return [f for f in files if f.file_key == key or (name and f.file_name == name)]
+        q = q.lower()
+        exact = [f for f in files if f.file_name.lower() == q]
+        return exact or [f for f in files if q in f.file_name.lower()]
+
+    def candidates(self):
+        """Archivos que se pueden abrir y conectar: los ya vistos y las pestañas abiertas en Figma."""
+        return {**self.known, **figma_open_tabs()}
+
+    def known_key(self, file_query):
+        """Key de un archivo no conectado: del link, o buscándolo por nombre."""
+        q = str(file_query)
+        url = FIGMA_URL_RE.search(q)
+        if url:
+            return url.group(1)
+        q = q.lower()
+        files = self.candidates()
+        exact = [k for k, n in files.items() if n.lower() == q]
+        matches = exact or [k for k, n in files.items() if q in n.lower()]
+        return matches[0] if len(matches) == 1 else None
 
     def pick(self, file_query):
         files = self.ready_files()
         if file_query:
-            q = str(file_query).lower()
-            exact = [f for f in files if f.file_name.lower() == q]
-            matches = exact or [f for f in files if q in f.file_name.lower()]
-            if not matches:
-                names = ", ".join(f.file_name for f in files) or "ninguno"
-                raise RuntimeError(f"No hay ningún archivo conectado que coincida con '{file_query}'. Conectados: {names}")
-            files = matches
+            files = self.match(file_query)
+            if not files:
+                names = ", ".join(f.file_name for f in self.ready_files()) or "ninguno"
+                raise RuntimeError(
+                    f"No hay ningún archivo conectado que coincida con '{file_query}'. Conectados: {names}. "
+                    "Pásame el link del archivo (figma.com/design/…) y lo abro y conecto solo.")
         # El archivo donde el usuario tocó algo más recientemente
         return max(files, key=lambda f: f.last_active)
+
+    async def open_and_connect(self, file_query):
+        """Abre la pestaña del archivo en Figma y enciende Bifrost ahí (Cmd+Option+P)."""
+        key = self.known_key(file_query)
+        if not key or not AUTOLAUNCH or sys.platform != "darwin":
+            return
+        async with self.launch_lock:
+            if self.match(file_query):
+                return
+            before = set(id(f) for f in self.files)
+            self.awaiting_key = key
+            log("Abriendo", self.candidates().get(key, key))
+            proc = await asyncio.create_subprocess_exec(
+                "open", "-a", "Figma", f"https://www.figma.com/design/{key}",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await proc.wait()
+            await asyncio.sleep(2.5)  # a que la pestaña quede al frente
+            # Si la pestaña tarda en cargar, el primer atajo se pierde: se intenta una segunda vez
+            for wait in (6, 10):
+                await self.press_launch_shortcut()
+                for _ in range(wait * 4):
+                    await asyncio.sleep(0.25)
+                    if self.match(file_query) or [f for f in self.ready_files() if id(f) not in before]:
+                        break
+                else:
+                    continue
+                break
+            self.awaiting_key = None
+
+    async def press_launch_shortcut(self):
+        script = [
+            "-e", 'if application "Figma" is not running then error "Figma no está abierto"',
+            "-e", 'tell application "Figma" to activate',
+            "-e", "delay 0.4",
+            "-e", 'tell application "System Events" to keystroke "p" using {command down, option down}',
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            "osascript", *script, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        _, err = await proc.communicate()
+        return proc.returncode, err.decode("utf-8", "replace").strip()
 
     async def auto_launch(self):
         """Pulsa Cmd+Option+P en Figma (relanzar el último plugin) para encender el puente solo."""
@@ -436,17 +570,8 @@ class Bridge:
         async with self.launch_lock:
             if self.ready_files():
                 return "ok"
-            script = [
-                "-e", 'if application "Figma" is not running then error "Figma no está abierto"',
-                "-e", 'tell application "Figma" to activate',
-                "-e", "delay 0.4",
-                "-e", 'tell application "System Events" to keystroke "p" using {command down, option down}',
-            ]
-            proc = await asyncio.create_subprocess_exec(
-                "osascript", *script, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-            _, err = await proc.communicate()
-            if proc.returncode != 0:
-                err = err.decode("utf-8", "replace").strip()
+            code, err = await self.press_launch_shortcut()
+            if code != 0:
                 log("Autolanzado falló:", err)
                 if "no está abierto" in err:
                     return "Figma no está abierto"
@@ -467,6 +592,8 @@ class Bridge:
                 "Ciérrala y en unos segundos esta toma la conexión."
             )
         file_query = params.pop("file", None)
+        if file_query and not self.match(file_query):
+            await self.open_and_connect(file_query)
         if not self.ready_files():
             status = await self.auto_launch()
             if not self.ready_files():

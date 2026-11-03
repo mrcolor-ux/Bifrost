@@ -26,6 +26,8 @@ If no file is connected, Bifrost brings Figma to the front and presses **Cmd+Opt
 - Allow it in **System Settings → Privacy & Security → Accessibility → Claude**.
 - Bifrost has to be the last plugin you ran in Figma.
 
+It also works for a file that isn't connected yet: name it (`file: "Flujos"`) or paste its figma.com link, and Bifrost opens its tab in Figma desktop and starts the plugin there. It finds files by name among the tabs open in Figma desktop and remembers every file it has connected in `~/.bifrost/files.json`.
+
 To turn it off, set `FIGMA_BRIDGE_AUTOLAUNCH=0` in the server's `env`.
 
 ## Using it
@@ -46,7 +48,7 @@ Some tips:
 
 | Tool | What it does |
 |---|---|
-| `list_files` | Shows connected files and which one is active |
+| `list_files` | Shows connected files, which one is active, and the ones Bifrost can open and connect on its own |
 | `get_document_info`, `get_selection`, `get_node_info`, `find_nodes` | Read the file, the selection or a node, and search nodes |
 | `set_current_page`, `select_nodes` | Navigate pages, select and zoom |
 | `create_frame`, `create_rectangle`, `create_ellipse`, `create_text` | Create elements |

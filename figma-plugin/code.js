@@ -367,11 +367,17 @@ var commands = {
     var data = p.data;
     if (!data || !data.nodes) throw new Error('No llegaron nodos para pegar');
     var parent = await getParent(p.parentId);
-    var ctx = { images: data.images || {}, imageCache: {}, count: 0, detached: [], missingFonts: {}, styleMisses: 0, varMisses: 0, warnings: [] };
+    var ctx = { images: data.images || {}, imageCache: {}, count: 0, detached: [], missingFonts: {}, styleMisses: 0, varMisses: 0, warnings: [], made: [] };
     var created = [];
-    for (var i = 0; i < data.nodes.length; i++) {
-      var n = await importNode(data.nodes[i], parent, ctx);
-      if (n) created.push(n);
+    try {
+      for (var i = 0; i < data.nodes.length; i++) {
+        var n = await importNode(data.nodes[i], parent, ctx);
+        if (n) created.push(n);
+      }
+    } catch (e) {
+      // No dejar copias a medias en el destino
+      ctx.made.forEach(function (r) { try { if (!r.removed) r.remove(); } catch (e2) {} });
+      throw e;
     }
     // Colocar el grupo pegado conservando la posición relativa entre nodos
     var minX = Infinity, minY = Infinity;
@@ -592,6 +598,24 @@ async function loadFontSafe(font, ctx) {
   }
 }
 
+// Figma no deja mover una instancia con textos sin tener sus fuentes cargadas
+async function loadNodeFonts(node, ctx) {
+  var texts = node.type === 'TEXT' ? [node] : ('findAllWithCriteria' in node ? node.findAllWithCriteria({ types: ['TEXT'] }) : []);
+  var seen = {};
+  for (var i = 0; i < texts.length; i++) {
+    var t = texts[i];
+    var fonts = t.characters.length ? t.getRangeAllFontNames(0, t.characters.length) : [t.fontName];
+    for (var j = 0; j < fonts.length; j++) {
+      var f = fonts[j];
+      if (!f || f === figma.mixed) continue;
+      var key = f.family + ' ' + f.style;
+      if (seen[key]) continue;
+      seen[key] = true;
+      try { await figma.loadFontAsync(f); } catch (e) { ctx.missingFonts[key] = true; }
+    }
+  }
+}
+
 function setSafe(node, key, value) {
   if (value === undefined || !(key in node)) return;
   try { node[key] = value; } catch (e) {}
@@ -734,7 +758,10 @@ async function importNode(d, parent, ctx) {
     if (t === 'FRAME' || t === 'COMPONENT' || t === 'COMPONENT_SET' || t === 'INSTANCE') node.fills = [];
   }
 
-  parent.appendChild(node);
+  ctx.made.push(node);
+  if (node.type === 'INSTANCE') await loadNodeFonts(node, ctx);
+  // Los nodos nuevos ya nacen en la página actual; moverlos otra vez falla si traen fuentes faltantes
+  if (node.parent !== parent) parent.appendChild(node);
   node.name = d.name;
   var isInstance = node.type === 'INSTANCE';
 
