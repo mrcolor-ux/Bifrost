@@ -22,9 +22,9 @@ The server uses only the Python 3 standard library, so there's nothing else to i
 
 ### Optional: let Claude start the plugin for you
 
-If no file is connected, Bifrost brings Figma to the front and presses **Cmd+Option+P** (*Run last plugin*). For this to work:
-- Allow it in **System Settings → Privacy & Security → Accessibility → Claude**.
-- Bifrost has to be the last plugin you ran in Figma.
+If no file is connected, Bifrost brings Figma to the front and runs itself from the **Plugins** menu (it prefers your development copy if you have one). This works even right after you restart Figma. If it can't find Bifrost in the menu, it presses **Cmd+Option+P** (*Run last plugin*) instead.
+
+For this to work, allow it in **System Settings → Privacy & Security → Accessibility → Claude**.
 
 It also works for a file that isn't connected yet: name it (`file: "Flujos"`) or paste its figma.com link, and Bifrost opens its tab in Figma desktop and starts the plugin there. It finds files by name among the tabs open in Figma desktop and remembers every file it has connected in `~/.bifrost/files.json`.
 
@@ -43,7 +43,7 @@ Some tips:
 - **Multiple Claude sessions at once.** The first session to start owns the bridge and the others work through it, so they all see the same files. If you close that session, another one takes over within a couple of seconds and the plugin reconnects on its own.
 - **Everything is undoable** with Cmd+Z in Figma.
 - **Other menu options:** **Mostrar panel** shows a small log window, and **Desconectar** turns the bridge off.
-- **Figma doesn't run plugins automatically on file open.** Reopening a file means relaunching the plugin with Cmd+Option+P or the **Conectar Claude** button in the right panel.
+- **Figma doesn't run plugins automatically on file open.** Claude starts Bifrost from the Plugins menu when it needs it. You can also use Cmd+Option+P or the **Conectar Claude** button in the right panel.
 
 ## Tools
 

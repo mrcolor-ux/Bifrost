@@ -43,9 +43,8 @@ Después reinicia la sesión de Claude.
    No se abre ninguna ventana; solo sale el aviso “🟢 Claude conectado”.
 2. Pídele cosas a Claude: “¿qué tengo seleccionado?”, “crea un banner de 1080×1080 con fondo naranja y el texto…”, “exporta este frame para que lo veas”.
 
-**Se enciende solo.** Si le pides algo a Claude y no hay ningún archivo conectado, el servidor pone Figma al frente y presiona **Cmd+Option+P** (*Run last plugin*). Para que esto funcione:
+**Se enciende solo.** Si le pides algo a Claude y no hay ningún archivo conectado, el servidor pone Figma al frente y corre Bifrost desde el menú **Plugins** (si tienes la versión en desarrollo, usa esa). Funciona aunque acabes de reiniciar Figma. Si no lo encuentra en el menú, presiona **Cmd+Option+P** (*Run last plugin*).
 - macOS tiene que darle permiso a la app de Claude: **Ajustes del Sistema → Privacidad y seguridad → Accesibilidad → Claude ✓**.
-- El último plugin que usaste en Figma tiene que haber sido Bifrost.
 - Para desactivarlo, pon `FIGMA_BRIDGE_AUTOLAUNCH=0` en el `env` del servidor.
 
 **Varios archivos a la vez.** Cada archivo donde corre el plugin queda conectado. Por default, Claude trabaja en el último archivo donde hiciste algo (seleccionar o cambiar de página). También le puedes pedir un archivo en particular, por ejemplo: “trae el componente X del DS y ponlo en el flujo”. La herramienta `list_files` muestra cuáles están conectados.

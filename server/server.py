@@ -21,7 +21,7 @@ import uuid
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("FIGMA_BRIDGE_PORT", "3055"))
 TIMEOUT = float(os.environ.get("FIGMA_BRIDGE_TIMEOUT", "60"))
-# Si no hay plugin conectado, mandar Cmd+Option+P a Figma para encenderlo solo
+# Si no hay plugin conectado, correr Bifrost desde el menú Plugins de Figma para encenderlo solo
 AUTOLAUNCH = os.environ.get("FIGMA_BRIDGE_AUTOLAUNCH", "1") != "0"
 # Archivos ya vistos (key -> nombre), para abrir su pestaña y conectarlos solos
 KNOWN_FILES_PATH = os.path.expanduser(os.environ.get("FIGMA_BRIDGE_FILES", "~/.bifrost/files.json"))
@@ -46,6 +46,30 @@ def figma_open_tabs():
                 tabs[m.group(1)] = t["title"]
     return tabs
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+# Plugins > (Desarrollo | Desde <organización> | …) > Bifrost > primer comando (Conectar a Claude).
+# Se prefiere la versión en desarrollo, que suele ser la más nueva.
+LAUNCH_SCRIPT = '''
+if application "Figma" is not running then error "Figma no está abierto"
+tell application "Figma" to activate
+delay 0.4
+tell application "System Events" to tell process "Figma"
+    set target to missing value
+    try
+        repeat with sec in menu items of menu 1 of menu bar item "Plugins" of menu bar 1
+            try
+                set b to menu item "Bifrost" of menu 1 of sec
+                if target is missing value or (name of sec) is in {"Desarrollo", "Development"} then set target to b
+            end try
+        end repeat
+    end try
+    if target is missing value then
+        keystroke "p" using {command down, option down}
+    else
+        click menu item 1 of menu 1 of target
+    end if
+end tell
+'''
 
 
 def log(*args):
@@ -655,7 +679,7 @@ class Bridge:
         return max(files, key=lambda f: f.last_active)
 
     async def open_and_connect(self, file_query):
-        """Abre la pestaña del archivo en Figma y enciende Bifrost ahí (Cmd+Option+P)."""
+        """Abre la pestaña del archivo en Figma y enciende Bifrost ahí."""
         key = self.known_key(file_query)
         if not key or not AUTOLAUNCH or sys.platform != "darwin":
             return
@@ -670,7 +694,7 @@ class Bridge:
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
             await proc.wait()
             await asyncio.sleep(2.5)  # a que la pestaña quede al frente
-            # Si la pestaña tarda en cargar, el primer atajo se pierde: se intenta una segunda vez
+            # Si la pestaña tarda en cargar, el primer intento se pierde: se intenta una segunda vez
             for wait in (6, 10):
                 await self.press_launch_shortcut()
                 for _ in range(wait * 4):
@@ -683,19 +707,15 @@ class Bridge:
             self.awaiting_key = None
 
     async def press_launch_shortcut(self):
-        script = [
-            "-e", 'if application "Figma" is not running then error "Figma no está abierto"',
-            "-e", 'tell application "Figma" to activate',
-            "-e", "delay 0.4",
-            "-e", 'tell application "System Events" to keystroke "p" using {command down, option down}',
-        ]
+        """Corre Bifrost desde el menú Plugins de Figma (funciona aunque Figma esté recién abierto);
+        si no lo encuentra en el menú, usa Cmd+Option+P (Run last plugin)."""
         proc = await asyncio.create_subprocess_exec(
-            "osascript", *script, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            "osascript", "-e", LAUNCH_SCRIPT, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
         _, err = await proc.communicate()
         return proc.returncode, err.decode("utf-8", "replace").strip()
 
     async def auto_launch(self):
-        """Pulsa Cmd+Option+P en Figma (relanzar el último plugin) para encender el puente solo."""
+        """Corre Bifrost en Figma desde el menú Plugins para encender el puente solo."""
         if not AUTOLAUNCH or sys.platform != "darwin":
             return "desactivado"
         async with self.launch_lock:
@@ -712,8 +732,8 @@ class Bridge:
                 await asyncio.wait_for(self.connected.wait(), 8)
                 return "ok"
             except asyncio.TimeoutError:
-                return ("lancé el atajo pero el plugin no respondió; puede que el último plugin que usaste "
-                        "en Figma no sea Bifrost")
+                return ("lancé Bifrost desde el menú Plugins pero no respondió; revisa que esté instalado y que "
+                        "haya un archivo abierto al frente")
 
     async def list_files_launching(self):
         """list_files; si no hay nada conectado, intenta encender el plugin primero."""
