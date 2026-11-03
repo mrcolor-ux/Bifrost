@@ -347,7 +347,11 @@ class Bridge:
     def __init__(self):
         self.files = []          # FileSession, varios archivos a la vez
         self.pending = {}
-        self.listening = False
+        self.listening = False   # esta sesión tiene el puerto (es la central)
+        self.hub = None          # conexión a la sesión central, si esta es cliente
+        self.hub_pending = {}
+        self.old_hub = False     # el puerto lo tiene una sesión con Bifrost viejo
+        self.ready = asyncio.Event()
         self.connected = asyncio.Event()
         self.launch_lock = asyncio.Lock()
         self.known = self.load_known()  # key -> nombre del archivo
@@ -373,21 +377,143 @@ class Bridge:
         except OSError as e:
             log("No pude guardar", KNOWN_FILES_PATH, e)
 
-    async def serve_forever(self):
-        """Abre el puerto; si otra sesión lo tiene ocupado, reintenta hasta que se libere."""
+    async def run(self):
+        """Abre el puerto (sesión central). Si otra sesión ya lo tiene, se le une como cliente
+        y le pasa sus llamadas; si esa sesión se cierra, vuelve a intentar quedarse con el puerto."""
         warned = False
         while True:
             try:
                 server = await asyncio.start_server(self.handle_client, HOST, PORT)
             except OSError:
-                if not warned:
-                    log(f"Puerto {PORT} ocupado por otra sesión; reintentando cada 3s…")
+                joined = await self.join_hub()
+                if joined is True:
+                    warned = False
+                    continue
+                self.old_hub = joined == "old"
+                if self.old_hub and not warned:
+                    log(f"Puerto {PORT} ocupado por una sesión con Bifrost viejo; reintentando cada 3s…")
                     warned = True
-                await asyncio.sleep(3)
+                await asyncio.sleep(3 if self.old_hub else 0.5)
                 continue
             self.listening = True
+            self.old_hub = False
+            self.ready.set()
             log(f"Esperando al plugin en ws://localhost:{PORT}")
-            return server
+            async with server:
+                await server.serve_forever()
+
+    async def join_hub(self):
+        """Se conecta a la sesión central como cliente (True al desconectarse de ella).
+        Regresa "old" si quien tiene el puerto no sabe compartirlo, o False si no se pudo conectar."""
+        try:
+            reader, writer = await asyncio.open_connection(HOST, PORT)
+            key = base64.b64encode(os.urandom(16)).decode()
+            writer.write((
+                f"GET / HTTP/1.1\r\nHost: {HOST}:{PORT}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\nX-Bifrost-Peer: 1\r\n\r\n"
+            ).encode())
+            await writer.drain()
+            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 3)
+            if b" 101 " not in head.split(b"\r\n", 1)[0]:
+                writer.close()
+                return False
+            conn = PluginConnection(reader, writer)
+            await conn.send_text(json.dumps({"type": "peer_hello"}))
+            try:
+                first = await asyncio.wait_for(conn.read_message(), 3)
+            except asyncio.TimeoutError:
+                first = None
+            if not first or json.loads(first).get("type") != "peer_ok":
+                writer.close()
+                return "old"
+        except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError, ValueError):
+            return False
+        self.hub = conn
+        self.old_hub = False
+        self.ready.set()
+        log("Otra sesión tiene el puerto; me uno a ella como cliente")
+        try:
+            while True:
+                msg = await conn.read_message()
+                if msg is None:
+                    break
+                try:
+                    data = json.loads(msg)
+                except ValueError:
+                    continue
+                fut = self.hub_pending.pop(data.get("id"), None)
+                if fut and not fut.done():
+                    fut.set_result(data)
+        except (asyncio.IncompleteReadError, ConnectionError):
+            pass
+        finally:
+            self.hub = None
+            self.ready.clear()
+            for fut in self.hub_pending.values():
+                if not fut.done():
+                    fut.set_exception(RuntimeError(
+                        "La sesión de Claude que tenía el puente se cerró. Vuelve a intentarlo; esta sesión toma el puerto."))
+            self.hub_pending.clear()
+            writer.close()
+            log("La sesión central se cerró; intento quedarme con el puerto")
+        return True
+
+    async def ask_hub(self, payload, timeout):
+        req_id = uuid.uuid4().hex
+        fut = asyncio.get_running_loop().create_future()
+        self.hub_pending[req_id] = fut
+        await self.hub.send_text(json.dumps({"id": req_id, **payload}))
+        try:
+            # La central aplica el timeout real; aquí solo un margen por si se cuelga
+            msg = await asyncio.wait_for(fut, timeout + 30)
+        except asyncio.TimeoutError:
+            self.hub_pending.pop(req_id, None)
+            raise RuntimeError(f"La sesión central de Bifrost no respondió en {timeout + 30:.0f}s")
+        if "error" in msg:
+            raise RuntimeError(msg["error"])
+        return msg
+
+    async def handle_peer(self, conn):
+        """Otra sesión de Claude conectada a esta como cliente."""
+        log("Se unió otra sesión de Claude")
+        try:
+            while True:
+                text = await conn.read_message()
+                if text is None:
+                    break
+                try:
+                    msg = json.loads(text)
+                except ValueError:
+                    continue
+                if msg.get("type") == "peer_hello":
+                    await conn.send_text(json.dumps({"type": "peer_ok"}))
+                else:
+                    asyncio.ensure_future(self.serve_peer(conn, msg))
+        except (asyncio.IncompleteReadError, ConnectionError):
+            pass
+        log("Se fue una sesión cliente")
+
+    async def serve_peer(self, conn, msg):
+        out = {"id": msg.get("id")}
+        try:
+            if msg.get("op") == "list_files":
+                out["result"] = await self.list_files_launching()
+            else:
+                out["file"], out["result"] = await self.call_local(
+                    msg["command"], msg.get("params") or {}, msg.get("timeout"))
+        except Exception as e:
+            out["error"] = str(e)
+        try:
+            await conn.send_text(json.dumps(out, ensure_ascii=False))
+        except (ConnectionError, OSError):
+            pass
+
+    async def wait_ready(self):
+        """Al arrancar, dar unos segundos a quedarse con el puerto o unirse a la central."""
+        try:
+            await asyncio.wait_for(self.ready.wait(), 5)
+        except asyncio.TimeoutError:
+            pass
 
     async def handle_client(self, reader, writer):
         try:
@@ -415,6 +541,11 @@ class Bridge:
             f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
         ).encode())
         await writer.drain()
+
+        if headers.get("x-bifrost-peer"):
+            await self.handle_peer(PluginConnection(reader, writer))
+            writer.close()
+            return
 
         session = FileSession(PluginConnection(reader, writer))
         self.files.append(session)
@@ -584,13 +715,42 @@ class Bridge:
                 return ("lancé el atajo pero el plugin no respondió; puede que el último plugin que usaste "
                         "en Figma no sea Bifrost")
 
+    async def list_files_launching(self):
+        """list_files; si no hay nada conectado, intenta encender el plugin primero."""
+        files = self.list_files()
+        if not files:
+            await self.auto_launch()
+            files = self.list_files()
+        return files
+
+    async def list_files_any(self):
+        await self.wait_ready()
+        if self.hub:
+            return (await self.ask_hub({"op": "list_files"}, 30)).get("result")
+        if self.listening:
+            return await self.list_files_launching()
+        return self.list_files()
+
+    def not_connected_error(self):
+        if self.old_hub:
+            return RuntimeError(
+                f"Otra sesión de Claude tiene el puente de Figma (puerto {PORT}) con una versión vieja de "
+                "Bifrost que no se puede compartir. Ciérrala y en unos segundos esta toma la conexión.")
+        return RuntimeError("Bifrost todavía está arrancando; vuelve a intentarlo en unos segundos.")
+
     async def call(self, command, params, timeout=None):
+        """Ejecuta el comando aquí si esta sesión tiene el puerto, o se lo pasa a la sesión central."""
         timeout = timeout or TIMEOUT
+        await self.wait_ready()
+        if self.hub:
+            msg = await self.ask_hub({"command": command, "params": params, "timeout": timeout}, timeout)
+            return msg.get("file"), msg.get("result")
         if not self.listening:
-            raise RuntimeError(
-                f"Otra sesión de Claude (Code o Chat) está usando el puente de Figma (puerto {PORT}). "
-                "Ciérrala y en unos segundos esta toma la conexión."
-            )
+            raise self.not_connected_error()
+        return await self.call_local(command, params, timeout)
+
+    async def call_local(self, command, params, timeout=None):
+        timeout = timeout or TIMEOUT
         file_query = params.pop("file", None)
         if file_query and not self.match(file_query):
             await self.open_and_connect(file_query)
@@ -662,10 +822,11 @@ async def handle_tool_call(bridge, req_id, params):
         reply(req_id, error={"code": -32602, "message": f"Herramienta desconocida: {name}"})
         return
     if name == "list_files":
-        files = bridge.list_files()
-        if not files and bridge.listening:
-            await bridge.auto_launch()
-            files = bridge.list_files()
+        try:
+            files = await bridge.list_files_any()
+        except Exception as e:
+            reply(req_id, {"content": [{"type": "text", "text": f"Error: {e}"}], "isError": True})
+            return
         reply(req_id, {"content": [{"type": "text", "text": json.dumps(files, ensure_ascii=False, separators=(',', ':'))}]})
         return
     if name == "copy_nodes":
@@ -719,7 +880,7 @@ async def handle_mcp(bridge, msg):
 
 async def main():
     bridge = Bridge()
-    server_task = asyncio.ensure_future(bridge.serve_forever())
+    server_task = asyncio.ensure_future(bridge.run())
 
     loop = asyncio.get_running_loop()
     while True:
@@ -735,10 +896,7 @@ async def main():
             continue
         asyncio.ensure_future(handle_mcp(bridge, msg))
 
-    if server_task.done():
-        server_task.result().close()
-    else:
-        server_task.cancel()
+    server_task.cancel()
 
 
 if __name__ == "__main__":

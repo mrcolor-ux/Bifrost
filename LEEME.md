@@ -50,6 +50,8 @@ Después reinicia la sesión de Claude.
 
 **Varios archivos a la vez.** Cada archivo donde corre el plugin queda conectado. Por default, Claude trabaja en el último archivo donde hiciste algo (seleccionar o cambiar de página). También le puedes pedir un archivo en particular, por ejemplo: “trae el componente X del DS y ponlo en el flujo”. La herramienta `list_files` muestra cuáles están conectados.
 
+**Varias sesiones de Claude a la vez.** La primera sesión que arranca se queda con el puente y las demás trabajan a través de ella, así que todas ven y editan los mismos archivos. Si cierras esa sesión, otra toma su lugar en un par de segundos y el plugin se reconecta solo.
+
 **Atajos**
 - **Cmd+Option+P** vuelve a correr el último plugin, así que reconecta en un segundo.
 - Después de la primera vez, el archivo muestra un botón **“Conectar Claude”** en el panel derecho, cuando no tienes nada seleccionado.
@@ -75,6 +77,6 @@ Figma no deja que un plugin corra sin que lo lances, así que se apaga si cambia
 
 - **“El plugin de Figma no está conectado”**: abre el plugin en Figma. Si ya estaba abierto, pulsa Conectar.
 - **El punto se queda amarillo**: Claude no tiene el servidor corriendo. Revisa el paso 2 y reinicia la sesión.
-- **“Otra sesión de Claude… está usando el puente”**: hay dos sesiones de Claude abiertas. Cierra una y en unos segundos la otra toma la conexión.
+- **“Otra sesión de Claude… con una versión vieja de Bifrost”**: una sesión que arrancó antes de actualizar Bifrost tiene el puente y no sabe compartirlo. Ciérrala (o reiníciala) y en unos segundos esta toma la conexión.
 - **Error de fuente en `create_text`**: la fuente tiene que estar instalada o disponible en Figma, y el estilo tiene que existir. Por ejemplo, `"Bold"` y no `"bold"`.
 - **Cambiar el puerto**: define la variable de entorno `FIGMA_BRIDGE_PORT` en el servidor, cámbialo en la ventana del plugin y actualiza `allowedDomains` en `manifest.json`.

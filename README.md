@@ -40,6 +40,7 @@ Ask Claude things like:
 
 Some tips:
 - **Multiple files at once.** Every file running the plugin stays connected. Claude works on the file you touched last, or on whichever file you name (`list_files` shows them).
+- **Multiple Claude sessions at once.** The first session to start owns the bridge and the others work through it, so they all see the same files. If you close that session, another one takes over within a couple of seconds and the plugin reconnects on its own.
 - **Everything is undoable** with Cmd+Z in Figma.
 - **Other menu options:** **Mostrar panel** shows a small log window, and **Desconectar** turns the bridge off.
 - **Figma doesn't run plugins automatically on file open.** Reopening a file means relaunching the plugin with Cmd+Option+P or the **Conectar Claude** button in the right panel.
@@ -70,7 +71,7 @@ Every tool accepts an optional `file` argument to target a specific connected fi
 
 - **"El plugin de Figma no está conectado"**: run Bifrost in Figma.
 - **The status dot stays yellow**: Claude isn't running the server. Re-run `install.command` and restart Claude.
-- **"Otra sesión de Claude… está usando el puente"**: two Claude sessions are open. Close one, and the other takes over within a few seconds.
+- **"Otra sesión de Claude… con una versión vieja de Bifrost"**: a session started before you updated Bifrost owns the bridge and can't share it. Close or restart it, and this one takes over within a few seconds.
 - **Font errors in `create_text`**: the font and style must exist in Figma. For example, use `"Bold"`, not `"bold"`.
 
 ## License
