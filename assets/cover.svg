@@ -15,13 +15,13 @@
 <g font-family="SF Pro Display, Helvetica Neue, Helvetica, Arial, sans-serif" fill="#ffffff">
  <text x="160" y="400" font-size="150" font-weight="800" letter-spacing="-3">Bifrost</text>
  <rect x="166" y="440" width="300" height="10" rx="5" fill="url(#rb)"/>
- <text x="160" y="540" font-size="56" font-weight="600">Connect Claude to Figma</text>
- <text x="160" y="610" font-size="36" fill="#c9c8ef">Let Claude read, create and edit your designs —</text>
- <text x="160" y="660" font-size="36" fill="#c9c8ef">right inside the files you already work in.</text>
+ <text x="160" y="540" font-size="56" font-weight="600">Conecta Claude con Figma</text>
+ <text x="160" y="610" font-size="36" fill="#c9c8ef">Deja que Claude lea, cree y edite tus diseños —</text>
+ <text x="160" y="660" font-size="36" fill="#c9c8ef">directo en los archivos donde ya trabajas.</text>
  <g font-size="30" fill="#e7e6ff">
-  <text x="160" y="790">✦  Works on any Figma plan</text>
-  <text x="160" y="845">✦  Local bridge · no extra cloud service or API key</text>
-  <text x="160" y="900">✦  Multiple files at once · swap DS components</text>
+  <text x="160" y="790">✦  Funciona con cualquier plan de Figma</text>
+  <text x="160" y="845">✦  Puente local · sin servicios en la nube ni API key</text>
+  <text x="160" y="900">✦  Varios archivos a la vez · cambia componentes del DS</text>
  </g>
 </g>
 </svg>
