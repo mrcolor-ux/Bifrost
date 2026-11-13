@@ -10,17 +10,19 @@ Let Claude read, create and edit your Figma files: frames, text, colors, auto la
 Claude (Code or desktop Chat) ──MCP/stdio──► server/server.py ──WebSocket localhost:3055──► Bifrost plugin in Figma
 ```
 
-The server uses only the Python 3 standard library, so there's nothing else to install.
+Works on **macOS and Windows**, with the Claude desktop app (Chat or Code) or Claude Code. It doesn't work on claude.ai in the browser or on mobile, because the server runs on your own computer. The server uses only the Python 3 standard library: macOS already has it, and on Windows the installer offers to install it.
 
-## Install (macOS)
+## Install
 
-1. **Download** [this repo](https://github.com/mrcolor-ux/Bifrost/archive/refs/heads/main.zip) and put it somewhere permanent, like `~/Documents/bifrost`.
-2. **Double-click `install.command`.** It registers Bifrost in Claude Code and in the Claude desktop app, and backs up your config files first.
-3. **Quit Claude** (Cmd+Q) and open it again.
-4. **Install the plugin in Figma desktop.** Get it from [Figma Community](#) or, for development, use **Plugins → Development → Import plugin from manifest…** and pick `figma-plugin/manifest.json`.
-5. **Run Plugins → Bifrost → Conectar a Claude.** You'll see the toast "🟢 Claude conectado".
+1. **Download** [Bifrost](https://github.com/mrcolor-ux/Bifrost/archive/refs/heads/main.zip) and unzip it (on Windows: right-click → **Extract All…**).
+2. **Run the installer.** It copies Bifrost to a permanent folder (`~/Library/Application Support/Bifrost` on macOS, `%LOCALAPPDATA%\Bifrost` on Windows), registers it in Claude Code and the Claude desktop app, and backs up your config files first.
+   - **macOS:** double-click `install.command`. If macOS says it can't be opened, go to **System Settings → Privacy & Security → Open Anyway**, or run `bash install.command` in Terminal.
+   - **Windows:** double-click `install.bat`. If you see "Windows protected your PC", choose **More info → Run anyway**.
+3. **Install the plugin in Figma desktop.** Use **Plugins → Development → Import plugin from manifest…** and pick `figma-plugin/manifest.json` in the installed folder. The installer copies that path to your clipboard.
+4. **Run Plugins → Development → Bifrost → Conectar a Claude.** You'll see the toast "🟢 Claude conectado".
+5. **Quit Claude completely** (Cmd+Q on macOS; on Windows right-click its icon next to the clock → Quit) and open it again.
 
-### Optional: let Claude start the plugin for you
+### Optional (macOS): let Claude start the plugin for you
 
 If no file is connected, Bifrost brings Figma to the front and runs itself from the **Plugins** menu (it prefers your development copy if you have one). This works even right after you restart Figma. If it can't find Bifrost in the menu, it presses **Cmd+Option+P** (*Run last plugin*) instead.
 
@@ -43,7 +45,7 @@ Some tips:
 - **Multiple Claude sessions at once.** The first session to start owns the bridge and the others work through it, so they all see the same files. If you close that session, another one takes over within a couple of seconds and the plugin reconnects on its own.
 - **Everything is undoable** with Cmd+Z in Figma.
 - **Other menu options:** **Mostrar panel** shows a small log window, and **Desconectar** turns the bridge off.
-- **Figma doesn't run plugins automatically on file open.** Claude starts Bifrost from the Plugins menu when it needs it. You can also use Cmd+Option+P or the **Conectar Claude** button in the right panel.
+- **Figma doesn't run plugins automatically on file open.** Claude starts Bifrost from the Plugins menu when it needs it. You can also use Cmd+Option+P (Ctrl+Alt+P on Windows) or the **Conectar Claude** button in the right panel.
 
 ## Tools
 
@@ -78,8 +80,8 @@ Everything Bifrost returns is read by Claude, so it keeps answers short:
 ## Troubleshooting
 
 - **"El plugin de Figma no está conectado"**: run Bifrost in Figma.
-- **The status dot stays yellow**: Claude isn't running the server. Re-run `install.command` and restart Claude.
-- **"Otra sesión de Claude… con una versión vieja de Bifrost"**: a session started before you updated Bifrost owns the bridge and can't share it. Close or restart it, and this one takes over within a few seconds.
+- **The status dot stays yellow**: Claude isn't running the server. Run the installer again and restart Claude.
+- **"El puerto 3055 lo tiene otro programa"**: either a session started before you updated Bifrost, or another Figma connector using the same port (such as "Talk to Figma"). Close it, and this session takes over within a few seconds.
 - **"Bifrost está desactualizado en este archivo"**: that tab is running an older copy of the plugin. Close it and run Bifrost again in that tab.
 - **Font errors in `create_text`**: the font and style must exist in Figma. For example, use `"Bold"`, not `"bold"`.
 

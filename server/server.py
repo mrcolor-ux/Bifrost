@@ -45,7 +45,10 @@ KNOWN_FILES_PATH = os.path.expanduser(os.environ.get("FIGMA_BRIDGE_FILES", "~/.b
 LIBRARY_DIR = os.path.expanduser(os.environ.get("FIGMA_BRIDGE_LIBRARY", "~/.bifrost/library"))
 FIGMA_URL_RE = re.compile(r"figma\.com/(?:design|file|board|proto|slides)/([A-Za-z0-9]+)")
 # La app de escritorio guarda aquí sus pestañas abiertas (título + key)
-FIGMA_SETTINGS_PATH = os.path.expanduser("~/Library/Application Support/Figma/settings.json")
+if sys.platform == "win32":
+    FIGMA_SETTINGS_PATH = os.path.join(os.environ.get("APPDATA", ""), "Figma", "settings.json")
+else:
+    FIGMA_SETTINGS_PATH = os.path.expanduser("~/Library/Application Support/Figma/settings.json")
 TAB_PATH_RE = re.compile(r"^/(?:file|design|board|proto|slides)/([A-Za-z0-9]+)")
 
 
@@ -640,7 +643,7 @@ class Bridge:
                     continue
                 self.old_hub = joined == "old"
                 if self.old_hub and not warned:
-                    log(f"Puerto {PORT} ocupado por una sesión con Bifrost viejo; reintentando cada 3s…")
+                    log(f"Puerto {PORT} ocupado por Bifrost viejo u otro programa; reintentando cada 3s…")
                     warned = True
                 await asyncio.sleep(3 if self.old_hub else 0.5)
                 continue
@@ -1003,8 +1006,9 @@ class Bridge:
     def not_connected_error(self):
         if self.old_hub:
             return RuntimeError(
-                f"Otra sesión de Claude tiene el puente de Figma (puerto {PORT}) con una versión vieja de "
-                "Bifrost que no se puede compartir. Ciérrala y en unos segundos esta toma la conexión.")
+                f"El puerto {PORT} lo tiene otro programa: una sesión de Claude con una versión vieja de "
+                "Bifrost, u otro conector de Figma que usa el mismo puerto (por ejemplo \"Talk to Figma\"). "
+                "Ciérralo y en unos segundos esta sesión toma la conexión.")
         return RuntimeError("Bifrost todavía está arrancando; vuelve a intentarlo en unos segundos.")
 
     async def call(self, command, params, timeout=None):
@@ -1287,6 +1291,12 @@ async def main():
 
 
 if __name__ == "__main__":
+    # En Windows la consola no usa UTF-8 por default; MCP siempre habla UTF-8 con una línea por mensaje.
+    for stream, opts in ((sys.stdin, {}), (sys.stdout, {"newline": "\n"}), (sys.stderr, {"newline": "\n"})):
+        try:
+            stream.reconfigure(encoding="utf-8", **opts)
+        except (AttributeError, ValueError):
+            pass
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
