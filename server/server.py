@@ -10,15 +10,19 @@ import asyncio
 import base64
 import contextvars
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import struct
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
 import uuid
+from urllib.parse import urlsplit
 
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("FIGMA_BRIDGE_PORT", "3055"))
@@ -36,17 +40,72 @@ current_tool = contextvars.ContextVar("current_tool", default=None)
 # Comandos que traen componentes de librerías: Figma solo los termina en la pestaña al frente
 FOREGROUND_COMMANDS = {"import_component", "import_nodes"}
 # Versión del plugin que espera este servidor (BIFROST_VERSION en code.js; los plugins viejos no la mandan)
-PLUGIN_VERSION = 4
+PLUGIN_VERSION = 8
+ALLOW_RUN_CODE = os.environ.get("FIGMA_BRIDGE_ALLOW_RUN_CODE") == "1"
+TOKEN_PATH = os.path.expanduser(os.environ.get("FIGMA_BRIDGE_TOKEN_FILE", "~/.bifrost/token"))
+
+
+def load_token(path):
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    if not os.path.exists(path):
+        fd, temporary = tempfile.mkstemp(dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="ascii") as f:
+                f.write(secrets.token_hex(32) + "\n")
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                pass
+        finally:
+            os.unlink(temporary)
+    with open(path, encoding="ascii") as f:
+        if os.fstat(f.fileno()).st_mode & 0o077:
+            raise RuntimeError("El archivo de vinculación debe tener permisos 600")
+        token = f.read().strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", token):
+        raise RuntimeError("Código de vinculación inválido")
+    return token
+
+
+def auth_proof(token, side, role, client_nonce, server_nonce):
+    message = f"bifrost-v5:{side}:{role}:{client_nonce}:{server_nonce}"
+    return hmac.new(token.encode("ascii"), message.encode("ascii"), hashlib.sha256).hexdigest()
+
+
+def valid_hex(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def verify_proof(value, expected):
+    return valid_hex(value) and hmac.compare_digest(value, expected)
+
+
 # Si no hay plugin conectado, correr Bifrost desde el menú Plugins de Figma para encenderlo solo
 AUTOLAUNCH = os.environ.get("FIGMA_BRIDGE_AUTOLAUNCH", "1") != "0"
 # Archivos ya vistos (key -> nombre), para abrir su pestaña y conectarlos solos
 KNOWN_FILES_PATH = os.path.expanduser(os.environ.get("FIGMA_BRIDGE_FILES", "~/.bifrost/files.json"))
 # Índices de librerías (Design Systems): un JSON por librería
 LIBRARY_DIR = os.path.expanduser(os.environ.get("FIGMA_BRIDGE_LIBRARY", "~/.bifrost/library"))
-FIGMA_URL_RE = re.compile(r"figma\.com/(?:design|file|board|proto|slides)/([A-Za-z0-9]+)")
 # La app de escritorio guarda aquí sus pestañas abiertas (título + key)
-FIGMA_SETTINGS_PATH = os.path.expanduser("~/Library/Application Support/Figma/settings.json")
+if sys.platform == "win32":
+    FIGMA_SETTINGS_PATH = os.path.join(os.environ.get("APPDATA", ""), "Figma", "settings.json")
+else:
+    FIGMA_SETTINGS_PATH = os.path.expanduser("~/Library/Application Support/Figma/settings.json")
 TAB_PATH_RE = re.compile(r"^/(?:file|design|board|proto|slides)/([A-Za-z0-9]+)")
+
+
+def binding_key(value):
+    if not isinstance(value, str) or len(value) > 2048:
+        return None
+    try:
+        url = urlsplit(value.strip())
+    except ValueError:
+        return None
+    if url.scheme != "https" or url.netloc.lower() not in {"figma.com", "www.figma.com"}:
+        return None
+    match = re.fullmatch(r"/(?:file|design|board|proto|slides)/([A-Za-z0-9]+)(?:/[^/]*)?/?", url.path)
+    return match.group(1) if match else None
 
 
 def figma_open_tabs():
@@ -362,6 +421,9 @@ TOOLS += [
         }),
     },
 ]
+if not ALLOW_RUN_CODE:
+    TOOLS = [tool for tool in TOOLS if tool["name"] != "run_code"]
+
 TOOL_NAMES = {t["name"] for t in TOOLS}
 
 
@@ -540,7 +602,7 @@ class PluginConnection:
             self.writer.write(bytes([0x80 | opcode, len(payload)]) + payload)
             await self.writer.drain()
 
-    async def read_message(self):
+    async def read_message(self, max_size=None):
         """Devuelve el siguiente mensaje de texto, o None si se cerró."""
         buf = bytearray()
         while True:
@@ -553,6 +615,8 @@ class PluginConnection:
                 (n,) = struct.unpack("!H", await self.reader.readexactly(2))
             elif n == 127:
                 (n,) = struct.unpack("!Q", await self.reader.readexactly(8))
+            if max_size is not None and len(buf) + n > max_size:
+                raise ValueError("Mensaje demasiado grande")
             mask = await self.reader.readexactly(4) if masked else None
             payload = bytearray(await self.reader.readexactly(n))
             if mask:
@@ -575,8 +639,11 @@ class FileSession:
 
     def __init__(self, conn):
         self.conn = conn
+        self.registered = False
         self.file_name = "?"
         self.file_key = None
+        self.key_from_figma = False  # la clave vino de figma.fileKey y no se puede quitar
+        self.stored_key_rejected = False
         self.page = None
         self.version = 1
         self.last_active = time.monotonic()
@@ -604,7 +671,8 @@ class Bridge:
         self.connected = asyncio.Event()
         self.launch_lock = asyncio.Lock()
         self.known = self.load_known()  # key -> nombre del archivo
-        self.awaiting_key = None        # key de la pestaña que se está abriendo
+        self.plugin_token = load_token(TOKEN_PATH)
+        self.peer_token = load_token(TOKEN_PATH + ".peer")
 
     @staticmethod
     def load_known():
@@ -640,7 +708,7 @@ class Bridge:
                     continue
                 self.old_hub = joined == "old"
                 if self.old_hub and not warned:
-                    log(f"Puerto {PORT} ocupado por una sesión con Bifrost viejo; reintentando cada 3s…")
+                    log(f"Puerto {PORT} ocupado por Bifrost viejo u otro programa; reintentando cada 3s…")
                     warned = True
                 await asyncio.sleep(3 if self.old_hub else 0.5)
                 continue
@@ -654,6 +722,7 @@ class Bridge:
     async def join_hub(self):
         """Se conecta a la sesión central como cliente (True al desconectarse de ella).
         Regresa "old" si quien tiene el puerto no sabe compartirlo, o False si no se pudo conectar."""
+        writer = None
         try:
             reader, writer = await asyncio.open_connection(HOST, PORT)
             key = base64.b64encode(os.urandom(16)).decode()
@@ -667,15 +736,12 @@ class Bridge:
                 writer.close()
                 return False
             conn = PluginConnection(reader, writer)
-            await conn.send_text(json.dumps({"type": "peer_hello"}))
-            try:
-                first = await asyncio.wait_for(conn.read_message(), 3)
-            except asyncio.TimeoutError:
-                first = None
-            if not first or json.loads(first).get("type") != "peer_ok":
+            if not await self.authenticate_hub(conn):
                 writer.close()
                 return "old"
         except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError, ValueError):
+            if writer:
+                writer.close()
             return False
         self.hub = conn
         self.old_hub = False
@@ -707,6 +773,43 @@ class Bridge:
             log("La sesión central se cerró; intento quedarme con el puerto")
         return True
 
+    async def authenticate_hub(self, conn):
+        role = "peer"
+        client = secrets.token_hex(32)
+        await conn.send_text(json.dumps({"type": "auth_start", "nonce": client}))
+        challenge = await self.read_auth(conn)
+        server = challenge.get("nonce")
+        if challenge.get("type") != "auth_challenge" or not valid_hex(server):
+            return False
+        if not verify_proof(challenge.get("proof"), auth_proof(self.peer_token, "server", role, client, server)):
+            return False
+        await conn.send_text(json.dumps({
+            "type": "auth_proof", "proof": auth_proof(self.peer_token, "client", role, client, server)}))
+        return (await self.read_auth(conn)).get("type") == "auth_ok"
+
+    @staticmethod
+    async def read_auth(conn, max_size=2048):
+        raw = await asyncio.wait_for(conn.read_message(max_size=max_size), 5)
+        data = json.loads(raw) if raw else {}
+        return data if isinstance(data, dict) else {}
+
+    async def authenticate_client(self, conn, role):
+        token = self.peer_token if role == "peer" else self.plugin_token
+        start = await self.read_auth(conn)
+        client = start.get("nonce")
+        if start.get("type") != "auth_start" or not valid_hex(client):
+            return False
+        server = secrets.token_hex(32)
+        await conn.send_text(json.dumps({
+            "type": "auth_challenge", "nonce": server,
+            "proof": auth_proof(token, "server", role, client, server)}))
+        answer = await self.read_auth(conn)
+        if answer.get("type") != "auth_proof" or not verify_proof(
+                answer.get("proof"), auth_proof(token, "client", role, client, server)):
+            return False
+        await conn.send_text(json.dumps({"type": "auth_ok"}))
+        return True
+
     async def ask_hub(self, payload):
         req_id = uuid.uuid4().hex
         fut = asyncio.get_running_loop().create_future()
@@ -730,9 +833,7 @@ class Bridge:
                     msg = json.loads(text)
                 except ValueError:
                     continue
-                if msg.get("type") == "peer_hello":
-                    await conn.send_text(json.dumps({"type": "peer_ok"}))
-                else:
+                if isinstance(msg, dict):
                     asyncio.ensure_future(self.serve_peer(conn, msg))
         except (asyncio.IncompleteReadError, ConnectionError):
             pass
@@ -762,7 +863,7 @@ class Bridge:
 
     async def handle_client(self, reader, writer):
         try:
-            request = await reader.readuntil(b"\r\n\r\n")
+            request = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
         except Exception:
             writer.close()
             return
@@ -787,58 +888,117 @@ class Bridge:
         ).encode())
         await writer.drain()
 
-        if headers.get("x-bifrost-peer"):
-            await self.handle_peer(PluginConnection(reader, writer))
+        conn = PluginConnection(reader, writer)
+        role = "peer" if headers.get("x-bifrost-peer") else "plugin"
+        try:
+            authenticated = await self.authenticate_client(conn, role)
+        except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError, ValueError):
+            authenticated = False
+        if not authenticated:
             writer.close()
             return
+        if role == "peer":
+            try:
+                await self.handle_peer(conn)
+            finally:
+                writer.close()
+            return
 
-        session = FileSession(PluginConnection(reader, writer))
-        self.files.append(session)
+        session = FileSession(conn)
         try:
+            hello = await self.read_auth(conn, max_size=16384)
+            if not self.register_plugin(session, hello):
+                log("Figma autenticado, pero el registro del documento es inválido")
+                await conn.send_text(json.dumps({"type": "registration_error"}))
+                return
+            await conn.send_text(json.dumps({
+                "type": "registered", "version": PLUGIN_VERSION, "canBindLink": not session.file_key,
+                "linkRemovable": bool(session.file_key and not session.key_from_figma),
+                "storedKeyRejected": session.stored_key_rejected,
+            }))
+            session.registered = True
+            self.files.append(session)
+            self.connected.set()
+            log("Conectado:", session.file_name, "(plugin viejo)" if session.outdated else "")
+            if session.outdated:
+                asyncio.ensure_future(self.warn_outdated(session))
             while True:
-                msg = await session.conn.read_message()
+                msg = await conn.read_message()
                 if msg is None:
                     break
-                self.on_plugin_message(session, msg)
-        except (asyncio.IncompleteReadError, ConnectionError):
-            pass
+                await self.on_plugin_message(session, msg)
+        except (asyncio.IncompleteReadError, OSError, asyncio.TimeoutError, ValueError):
+            if not session.registered:
+                log("Figma autenticado, pero el registro no se completó")
         finally:
             if session in self.files:
                 self.files.remove(session)
+                log("Desconectado:", session.file_name)
             if not self.files:
                 self.connected.clear()
-            log("Desconectado:", session.file_name)
             writer.close()
 
-    def on_plugin_message(self, session, text):
+    def register_plugin(self, session, hello):
+        name = hello.get("fileName")
+        version = hello.get("version")
+        if hello.get("type") != "hello" or not isinstance(name, str) or not name.strip():
+            return False
+        if type(version) is not int or version < 5:
+            return False
+        session.file_name = name
+        session.version = version
+        key = hello.get("fileKey")
+        if isinstance(key, str) and key:
+            if hello.get("fileKeySource") == "stored":
+                # Un archivo duplicado hereda el enlace guardado: si ya está en uso, se descarta
+                if any(other.file_key == key for other in self.ready_files()):
+                    session.stored_key_rejected = True
+                else:
+                    session.file_key = key
+            else:
+                session.file_key = key
+                session.key_from_figma = True
+        if isinstance(hello.get("page"), str):
+            session.page = hello["page"]
+        self.remember(session.file_key, session.file_name)
+        return True
+
+    def bind_link(self, session, url):
+        key = binding_key(url)
+        if not key:
+            return "Pega un enlace HTTPS a un archivo de figma.com"
+        if session.file_key and session.file_key != key:
+            return "Este documento ya tiene un enlace. Quítalo para asociar otro."
+        if any(other is not session and other.file_key == key for other in self.ready_files()):
+            return "Ese enlace ya está asociado a otra sesión de Figma"
+        session.file_key = key
+        return None
+
+    async def on_plugin_message(self, session, text):
         try:
             msg = json.loads(text)
         except ValueError:
             return
+        if not isinstance(msg, dict):
+            return
         kind = msg.get("type")
-        if kind in ("hello", "active"):
-            if msg.get("fileName"):
+        if kind == "bind_link":
+            error = self.bind_link(session, msg.get("url"))
+            await session.conn.send_text(json.dumps({
+                "type": "link_binding", "error": error, "fileKey": None if error else session.file_key,
+            }))
+            return
+        if kind == "unbind_link":
+            if session.file_key and not session.key_from_figma:
+                session.file_key = None
+            await session.conn.send_text(json.dumps({"type": "link_unbound", "removed": not session.file_key}))
+            return
+        if kind == "active":
+            if isinstance(msg.get("fileName"), str) and msg["fileName"].strip():
                 session.file_name = msg["fileName"]
-            if msg.get("fileKey"):
-                session.file_key = msg["fileKey"]
-            if msg.get("page"):
+            if isinstance(msg.get("page"), str):
                 session.page = msg["page"]
             session.last_active = time.monotonic()
-            if kind == "hello":
-                session.version = int(msg.get("version") or 1)
-                log("Conectado:", session.file_name, "(plugin viejo)" if session.outdated else "")
-                if session.outdated:
-                    asyncio.ensure_future(self.warn_outdated(session))
-                # Si acabamos de abrir una pestaña por su key, este es ese archivo
-                if not session.file_key and self.awaiting_key:
-                    session.file_key = self.awaiting_key
-                    self.awaiting_key = None
-                if not session.file_key:
-                    same = [k for k, n in figma_open_tabs().items() if n == session.file_name]
-                    if len(same) == 1:
-                        session.file_key = same[0]
-                self.remember(session.file_key, session.file_name)
-                self.connected.set()
             return
         if kind == "progress":
             if msg.get("id") in self.pending:
@@ -859,7 +1019,7 @@ class Bridge:
             pass
 
     def ready_files(self):
-        return [f for f in self.files if f.file_name != "?"]
+        return [f for f in self.files if f.registered]
 
     def list_files(self):
         active = self.pick(None) if self.ready_files() else None
@@ -880,11 +1040,9 @@ class Bridge:
         """Archivos conectados que coinciden con el nombre o link pedido."""
         files = self.ready_files()
         q = str(file_query)
-        url = FIGMA_URL_RE.search(q)
-        if url:
-            key = url.group(1)
-            name = self.candidates().get(key)
-            return [f for f in files if f.file_key == key or (name and f.file_name == name)]
+        key = binding_key(q)
+        if key:
+            return [f for f in files if f.file_key == key]
         q = q.lower()
         exact = [f for f in files if f.file_name.lower() == q]
         return exact or [f for f in files if q in f.file_name.lower()]
@@ -896,9 +1054,9 @@ class Bridge:
     def known_key(self, file_query):
         """Key de un archivo no conectado: del link, o buscándolo por nombre."""
         q = str(file_query)
-        url = FIGMA_URL_RE.search(q)
-        if url:
-            return url.group(1)
+        key = binding_key(q)
+        if key:
+            return key
         q = q.lower()
         files = self.candidates()
         exact = [k for k, n in files.items() if n.lower() == q]
@@ -913,7 +1071,9 @@ class Bridge:
                 names = ", ".join(f.file_name for f in self.ready_files()) or "ninguno"
                 raise RuntimeError(
                     f"No hay ningún archivo conectado que coincida con '{file_query}'. Conectados: {names}. "
-                    "Pásame el link del archivo (figma.com/design/…) y lo abro y conecto solo.")
+                    "Abre Bifrost en ese documento y asocia su enlace en el panel, o usa un nombre único.")
+            if len(files) > 1:
+                raise RuntimeError(f"Varios archivos coinciden con '{file_query}'. Usa un enlace de Figma o deja conectado solo el archivo de destino.")
         # El archivo donde el usuario tocó algo más recientemente
         return max(files, key=lambda f: f.last_active)
 
@@ -925,8 +1085,6 @@ class Bridge:
         async with self.launch_lock:
             if self.match(file_query):
                 return
-            before = set(id(f) for f in self.files)
-            self.awaiting_key = key
             log("Abriendo", self.candidates().get(key, key))
             proc = await asyncio.create_subprocess_exec(
                 "open", "-a", "Figma", f"https://www.figma.com/design/{key}",
@@ -938,12 +1096,11 @@ class Bridge:
                 await self.press_launch_shortcut()
                 for _ in range(wait * 4):
                     await asyncio.sleep(0.25)
-                    if self.match(file_query) or [f for f in self.ready_files() if id(f) not in before]:
+                    if self.match(file_query):
                         break
                 else:
                     continue
                 break
-            self.awaiting_key = None
 
     async def bring_to_front(self, session):
         """Figma solo importa componentes de librerías en la pestaña que está al frente."""
@@ -1003,8 +1160,9 @@ class Bridge:
     def not_connected_error(self):
         if self.old_hub:
             return RuntimeError(
-                f"Otra sesión de Claude tiene el puente de Figma (puerto {PORT}) con una versión vieja de "
-                "Bifrost que no se puede compartir. Ciérrala y en unos segundos esta toma la conexión.")
+                f"El puerto {PORT} lo tiene otro programa: una sesión de Claude con una versión vieja de "
+                "Bifrost, u otro conector de Figma que usa el mismo puerto (por ejemplo \"Talk to Figma\"). "
+                "Ciérralo y en unos segundos esta sesión toma la conexión.")
         return RuntimeError("Bifrost todavía está arrancando; vuelve a intentarlo en unos segundos.")
 
     async def call(self, command, params, timeout=None):
@@ -1019,6 +1177,8 @@ class Bridge:
         return await self.call_local(command, params, timeout)
 
     async def call_local(self, command, params, timeout=None):
+        if command == "run_code" and not ALLOW_RUN_CODE:
+            raise RuntimeError("run_code está deshabilitado")
         timeout = timeout or TIMEOUT
         file_query = params.pop("file", None)
         if file_query and not self.match(file_query):
@@ -1251,7 +1411,7 @@ async def handle_mcp(bridge, msg):
                 "Controla Figma a través del plugin local 'Bifrost'. Puede haber varios archivos "
                 "conectados a la vez (list_files); por default cada herramienta actúa sobre el último archivo "
                 "donde el usuario trabajó, o pasa `file` para elegir otro (ej. copiar un componente del DS a "
-                "un flujo). Empieza con get_document_info o get_selection. Para lo demás, usa run_code."
+                "un flujo). Empieza con get_document_info o get_selection."
             ),
         })
     elif method == "tools/list":
@@ -1287,6 +1447,12 @@ async def main():
 
 
 if __name__ == "__main__":
+    # En Windows la consola no usa UTF-8 por default; MCP siempre habla UTF-8 con una línea por mensaje.
+    for stream, opts in ((sys.stdin, {}), (sys.stdout, {"newline": "\n"}), (sys.stderr, {"newline": "\n"})):
+        try:
+            stream.reconfigure(encoding="utf-8", **opts)
+        except (AttributeError, ValueError):
+            pass
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

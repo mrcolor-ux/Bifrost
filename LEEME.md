@@ -6,18 +6,14 @@ Conecta Claude con Figma sin el conector oficial. Funciona con cualquier plan de
 Claude  ──(MCP / stdio)──►  server/server.py  ──(WebSocket :3055)──►  Plugin "Bifrost" en Figma
 ```
 
-No hay que instalar nada: el servidor usa solo Python 3, que ya viene en la Mac.
+Funciona en **macOS y Windows**, con la app de escritorio de Claude (Chat o Code) o Claude Code. No funciona en claude.ai desde el navegador ni en el celular. El servidor usa solo Python 3: en Mac ya viene; en Windows el instalador ofrece instalarlo.
 
-## 1. Instalar el plugin en Figma (una sola vez)
+## 1. Registrar el servidor en Claude (una sola vez)
 
-1. Abre la **app de escritorio de Figma**. Los plugins de desarrollo no se pueden importar desde el navegador.
-2. Abre cualquier archivo de diseño.
-3. Menú **Plugins → Development → Import plugin from manifest…**
-4. Elige `figma-plugin/manifest.json` de esta carpeta.
+Descomprime el zip y corre el instalador. Copia Bifrost a un lugar fijo (`~/Library/Application Support/Bifrost` en Mac, `%LOCALAPPDATA%\Bifrost` en Windows), lo registra en Claude Code y en el Chat de la app de escritorio, y hace respaldo de tu configuración antes.
 
-## 2. Registrar el servidor en Claude (una sola vez)
-
-Lo más fácil es darle **doble clic a `install.command`**: registra Bifrost en Claude Code y en el Chat de la app de escritorio, y hace respaldo de tu configuración antes.
+- **Mac:** doble clic en `install.command`. Si macOS dice que no se puede abrir: **Ajustes del Sistema → Privacidad y seguridad → Abrir de todos modos**. También puedes correrlo en Terminal con `bash install.command`.
+- **Windows:** clic derecho en el zip → **Extraer todo…**, y doble clic en `install.bat`. Si sale "Windows protegió tu PC": **Más información → Ejecutar de todas formas**.
 
 Si prefieres hacerlo a mano, agrega esto en `~/.claude.json`, dentro de `"mcpServers"`, con la ruta real de esta carpeta:
 
@@ -25,17 +21,32 @@ Si prefieres hacerlo a mano, agrega esto en `~/.claude.json`, dentro de `"mcpSer
 "bifrost": {
   "type": "stdio",
   "command": "/usr/bin/python3",
-  "args": ["/RUTA/A/claude-figma-bridge/server/server.py"]
+  "args": ["/RUTA/A/Bifrost/server/server.py"]
 }
 ```
 
 Si tienes el CLI de `claude`, también lo puedes registrar así:
 
 ```bash
-claude mcp add --scope user bifrost -- /usr/bin/python3 /RUTA/A/claude-figma-bridge/server/server.py
+claude mcp add --scope user bifrost -- /usr/bin/python3 /RUTA/A/Bifrost/server/server.py
 ```
 
-Después reinicia la sesión de Claude.
+## 2. Instalar el plugin en Figma (una sola vez)
+
+1. Abre la **app de escritorio de Figma**. Los plugins de desarrollo no se pueden importar desde el navegador.
+2. Abre cualquier archivo de diseño.
+3. Menú **Plugins → Development → Import plugin from manifest…**
+4. Elige `figma-plugin/manifest.json` de la carpeta donde quedó instalado. El instalador deja la ruta copiada: en Mac pega con **Cmd+Shift+G** y **Cmd+V**; en Windows pega con **Ctrl+V** en el campo del nombre.
+
+Después cierra Claude por completo (en Windows: clic derecho en su ícono junto al reloj → Quit) y vuelve a abrirlo.
+
+## Vincular Bifrost (una sola vez)
+
+Reinicia Claude después de instalar o actualizar el servidor. Abre una sesión con Bifrost habilitado para que se cree `~/.bifrost/token`. Abre Bifrost en Figma, pega el contenido de ese archivo en **Código de vinculación** y pulsa **Conectar**. Figma guarda el código localmente. El panel muestra «Conectado con Claude» cuando el puente confirma el registro del documento. Si el panel muestra una versión anterior, vuelve a abrir el plugin de desarrollo desde el manifiesto local. Si cambias el código, usa **Mostrar panel** para volver a vincularlo. Mantén el código en privado.
+
+`run_code` está deshabilitado por defecto. Para habilitarlo, configura `FIGMA_BRIDGE_ALLOW_RUN_CODE=1` en el entorno del servidor MCP y reinicia todas las sesiones de Bifrost.
+
+Cuando Figma no expone la clave del archivo, abre Bifrost en el documento, copia el enlace de ese mismo archivo, pégalo en el panel y pulsa **Asociar**. Desde la v8 el enlace se guarda dentro del archivo y se recupera al volver a abrir el plugin. Para cambiarlo, abre **Ver enlace** y pulsa **Quitar enlace**. Si duplicas el archivo y ambas copias están abiertas, la segunda pide asociar su propio enlace.
 
 ## 3. Usarlo
 
@@ -45,6 +56,7 @@ Después reinicia la sesión de Claude.
 
 **Se enciende solo.** Si le pides algo a Claude y no hay ningún archivo conectado, el servidor pone Figma al frente y corre Bifrost desde el menú **Plugins** (si tienes la versión en desarrollo, usa esa). Funciona aunque acabes de reiniciar Figma. Si no lo encuentra en el menú, presiona **Cmd+Option+P** (*Run last plugin*).
 - macOS tiene que darle permiso a la app de Claude: **Ajustes del Sistema → Privacidad y seguridad → Accesibilidad → Claude ✓**.
+- Solo en Mac. En Windows el plugin se corre a mano desde el menú **Plugins** (o **Ctrl+Alt+P**).
 - Para desactivarlo, pon `FIGMA_BRIDGE_AUTOLAUNCH=0` en el `env` del servidor.
 
 **Varios archivos a la vez.** Cada archivo donde corre el plugin queda conectado. Por default, Claude trabaja en el último archivo donde hiciste algo (seleccionar o cambiar de página). También le puedes pedir un archivo en particular, por ejemplo: “trae el componente X del DS y ponlo en el flujo”. La herramienta `list_files` muestra cuáles están conectados.
@@ -52,7 +64,7 @@ Después reinicia la sesión de Claude.
 **Varias sesiones de Claude a la vez.** La primera sesión que arranca se queda con el puente y las demás trabajan a través de ella, así que todas ven y editan los mismos archivos. Si cierras esa sesión, otra toma su lugar en un par de segundos y el plugin se reconecta solo.
 
 **Atajos**
-- **Cmd+Option+P** vuelve a correr el último plugin, así que reconecta en un segundo.
+- **Cmd+Option+P** (Ctrl+Alt+P en Windows) vuelve a correr el último plugin, así que reconecta en un segundo.
 - Después de la primera vez, el archivo muestra un botón **“Conectar Claude”** en el panel derecho, cuando no tienes nada seleccionado.
 - **Mostrar panel** abre la ventanita con el log, por si quieres ver qué está haciendo Claude.
 - **Desconectar**, o el botón del aviso, apaga el puente.
@@ -83,8 +95,8 @@ Claude lee todo lo que regresa Bifrost, así que las respuestas van cortas:
 ## Problemas comunes
 
 - **“El plugin de Figma no está conectado”**: abre el plugin en Figma. Si ya estaba abierto, pulsa Conectar.
-- **El punto se queda amarillo**: Claude no tiene el servidor corriendo. Revisa el paso 2 y reinicia la sesión.
-- **“Otra sesión de Claude… con una versión vieja de Bifrost”**: una sesión que arrancó antes de actualizar Bifrost tiene el puente y no sabe compartirlo. Ciérrala (o reiníciala) y en unos segundos esta toma la conexión.
+- **El punto se queda amarillo**: Claude no tiene el servidor corriendo. Corre el instalador otra vez y reinicia Claude.
+- **“El puerto 3055 lo tiene otro programa”**: o una sesión que arrancó antes de actualizar Bifrost, o otro conector de Figma que usa el mismo puerto (por ejemplo “Talk to Figma”). Ciérralo y en unos segundos esta sesión toma la conexión.
 - **“Bifrost está desactualizado en este archivo”**: esa pestaña trae una versión vieja del plugin. Ciérralo y vuelve a abrirlo en esa pestaña.
 - **Error de fuente en `create_text`**: la fuente tiene que estar instalada o disponible en Figma, y el estilo tiene que existir. Por ejemplo, `"Bold"` y no `"bold"`.
 - **Cambiar el puerto**: define la variable de entorno `FIGMA_BRIDGE_PORT` en el servidor, cámbialo en la ventana del plugin y actualiza `allowedDomains` en `manifest.json`.
