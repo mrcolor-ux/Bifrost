@@ -40,6 +40,14 @@ claude mcp add --scope user bifrost -- /usr/bin/python3 /RUTA/A/Bifrost/server/s
 
 Después cierra Claude por completo (en Windows: clic derecho en su ícono junto al reloj → Quit) y vuelve a abrirlo.
 
+## Vincular Bifrost (una sola vez)
+
+Reinicia Claude después de instalar o actualizar el servidor. Abre una sesión con Bifrost habilitado para que se cree `~/.bifrost/token`. Abre Bifrost en Figma, pega el contenido de ese archivo en **Código de vinculación** y pulsa **Conectar**. Figma guarda el código localmente. El panel muestra «Conectado con Claude» cuando el puente confirma el registro del documento. Si el panel muestra una versión anterior, vuelve a abrir el plugin de desarrollo desde el manifiesto local. Si cambias el código, usa **Mostrar panel** para volver a vincularlo. Mantén el código en privado.
+
+`run_code` está deshabilitado por defecto. Para habilitarlo, configura `FIGMA_BRIDGE_ALLOW_RUN_CODE=1` en el entorno del servidor MCP y reinicia todas las sesiones de Bifrost.
+
+Cuando Figma no expone la clave del archivo, abre Bifrost en el documento, copia el enlace de ese mismo archivo, pégalo en el panel y pulsa **Asociar**. Desde la v8 el enlace se guarda dentro del archivo y se recupera al volver a abrir el plugin. Para cambiarlo, abre **Ver enlace** y pulsa **Quitar enlace**. Si duplicas el archivo y ambas copias están abiertas, la segunda pide asociar su propio enlace.
+
 ## 3. Usarlo
 
 1. En Figma: **Plugins → Development → Bifrost → Conectar a Claude (en segundo plano)**.

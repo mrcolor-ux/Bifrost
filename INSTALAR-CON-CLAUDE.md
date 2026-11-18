@@ -70,10 +70,8 @@ Esto lo hace la persona, porque Figma no deja instalarlo desde afuera. El instal
 4. En la ventana de archivos:
    - **Mac:** presiona **Cmd+Shift+G**, pega con **Cmd+V** y presiona Enter.
    - **Windows:** pega con **Ctrl+V** en el campo del nombre de archivo y presiona Enter.
-5. Corre **Plugins → Development → Bifrost → Conectar a Claude (en segundo plano)**.
-6. Debe aparecer el aviso **🟢 Claude conectado** o un punto amarillo de espera. El amarillo es normal hasta reiniciar Claude.
 
-Espera a que te confirme que lo importó.
+Espera a que te confirme que lo importó. La conexión se hace después de reiniciar Claude.
 
 ## 4. Reinicia Claude (siempre al final)
 
@@ -82,7 +80,10 @@ Reiniciar cierra esta conversación, así que antes de pedirlo déjale claro lo 
 1. Cierra Claude por completo y vuelve a abrirlo:
    - **Mac:** **Cmd+Q**.
    - **Windows:** clic derecho en el ícono de Claude junto al reloj → **Quit**. Cerrar la ventana no basta.
-2. En una conversación nueva, con Figma abierto, pregunta: **"¿Qué tengo seleccionado en Figma?"**
+2. Al abrir Claude se crea el código de vinculación en `~/.bifrost/token` (en Windows, `%USERPROFILE%\.bifrost\token`). Ábrelo con un editor de texto y copia su contenido.
+3. En Figma, corre **Plugins → Development → Bifrost → Mostrar panel**, pega el código en **Código de vinculación** y pulsa **Conectar**. Figma lo recuerda, así que solo se hace una vez.
+4. El panel debe mostrar **Conectado con Claude**.
+5. En una conversación nueva, con Figma abierto, pregunta: **"¿Qué tengo seleccionado en Figma?"**
 
 Solo en Mac, opcional, para que Claude encienda el plugin solo: **Ajustes del Sistema → Privacidad y seguridad → Accesibilidad → Claude**. Ese permiso lo tiene que dar la persona. En Windows el plugin se enciende a mano desde el menú Plugins.
 

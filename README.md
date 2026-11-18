@@ -19,8 +19,8 @@ Works on **macOS and Windows**, with the Claude desktop app (Chat or Code) or Cl
    - **macOS:** double-click `install.command`. If macOS says it can't be opened, go to **System Settings → Privacy & Security → Open Anyway**, or run `bash install.command` in Terminal.
    - **Windows:** double-click `install.bat`. If you see "Windows protected your PC", choose **More info → Run anyway**.
 3. **Install the plugin in Figma desktop.** Use **Plugins → Development → Import plugin from manifest…** and pick `figma-plugin/manifest.json` in the installed folder. The installer copies that path to your clipboard.
-4. **Run Plugins → Development → Bifrost → Conectar a Claude.** You'll see the toast "🟢 Claude conectado".
-5. **Quit Claude completely** (Cmd+Q on macOS; on Windows right-click its icon next to the clock → Quit) and open it again.
+4. **Quit Claude completely** (Cmd+Q on macOS; on Windows right-click its icon next to the clock → Quit) and open it again.
+5. **Run Plugins → Development → Bifrost → Conectar a Claude.** Complete the pairing below to see the toast "🟢 Claude conectado".
 
 ### Optional (macOS): let Claude start the plugin for you
 
@@ -31,6 +31,13 @@ For this to work, allow it in **System Settings → Privacy & Security → Acces
 It also works for a file that isn't connected yet: name it (`file: "Flujos"`) or paste its figma.com link, and Bifrost opens its tab in Figma desktop and starts the plugin there. It finds files by name among the tabs open in Figma desktop and remembers every file it has connected in `~/.bifrost/files.json`.
 
 To turn it off, set `FIGMA_BRIDGE_AUTOLAUNCH=0` in the server's `env`.
+
+### Pairing Bifrost
+
+Restart Claude after updating the server. Open a Claude session with Bifrost enabled so it creates `~/.bifrost/token`. Reopen Bifrost in Figma, paste the contents of that file into the pairing field, and click **Conectar**. Figma remembers the pairing locally. The panel shows “Conectado con Claude” once the bridge acknowledges the document. If the panel shows an older version, reopen the development plugin from the local manifest. If you rotate the code, use **Mostrar panel** to pair again. Keep the pairing code private.
+
+`run_code` is disabled by default. To enable it, set `FIGMA_BRIDGE_ALLOW_RUN_CODE=1` in the MCP server environment and restart all Bifrost sessions. When Figma withholds the file key, open Bifrost in the document, paste that document’s link into the panel, and click **Asociar**. Since v8 the link is saved inside the file and restored when you reopen the plugin. To change it, open **Ver enlace** and click **Quitar enlace**. If a duplicated file is open next to the original, the copy asks for its own link.
+
 
 ## Using it
 

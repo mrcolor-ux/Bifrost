@@ -5,17 +5,22 @@
 
 // Súbelo junto con PLUGIN_VERSION de server.py cuando agregues o cambies comandos,
 // para que el servidor avise si una pestaña trae una versión vieja.
-var BIFROST_VERSION = 4;
+var BIFROST_VERSION = 8;
+
+var panelChannel;
+
+function postToPanel(message) {
+  if (panelChannel) figma.ui.postMessage(Object.assign({ channel: panelChannel }, message));
+}
 
 if (figma.command === 'disconnect') {
   figma.closePlugin('Claude desconectado');
 } else {
   var showPanel = figma.command === 'panel';
-  figma.showUI(__html__, { width: 300, height: 250, title: 'Bifrost', visible: showPanel });
-  figma.ui.postMessage({ type: 'init', fileName: figma.root.name, fileKey: figma.fileKey, page: figma.currentPage.name, version: BIFROST_VERSION });
+  figma.showUI(__html__, { width: 360, height: 534, themeColors: true, title: 'Bifrost', visible: showPanel });
   // Avisa al servidor cuando trabajas en este archivo, para que Claude sepa cuál es el activo
   var reportActive = function () {
-    figma.ui.postMessage({ type: 'active', fileName: figma.root.name, page: figma.currentPage.name });
+    postToPanel({ type: 'active', fileName: figma.root.name, page: figma.currentPage.name });
   };
   figma.on('selectionchange', reportActive);
   figma.on('currentpagechange', reportActive);
@@ -390,17 +395,6 @@ var commands = {
     var parent = await getParent(p.parentId);
     var ctx = { images: data.images || {}, imageCache: {}, count: 0, detached: [], missingFonts: {}, styleMisses: 0, varMisses: 0, warnings: [], made: [] };
     var created = [];
-    try {
-      for (var i = 0; i < data.nodes.length; i++) {
-        var n = await importNode(data.nodes[i], parent, ctx);
-        if (n) created.push(n);
-      }
-    } catch (e) {
-      // No dejar copias a medias en el destino
-      ctx.made.forEach(function (r) { try { if (!r.removed) r.remove(); } catch (e2) {} });
-      throw e;
-    }
-    // Colocar el grupo pegado conservando la posición relativa entre nodos
     var minX = Infinity, minY = Infinity;
     data.nodes.forEach(function (d) {
       if (d.absX !== undefined) { minX = Math.min(minX, d.absX); minY = Math.min(minY, d.absY); }
@@ -409,24 +403,37 @@ var commands = {
     if (p.nextToId) {
       var ref = await getNode(p.nextToId);
       var rb = ref.absoluteBoundingBox;
+      if (!rb) throw new Error('El nodo de referencia no tiene límites visibles');
       baseX = rb.x + rb.width + (p.gap === undefined ? 200 : p.gap);
       baseY = rb.y;
     }
-    if (baseX === undefined && parent.type === 'PAGE') {
+    if (baseX === undefined && baseY === undefined && parent.type === 'PAGE') {
       var c = figma.viewport.center;
       baseX = Math.round(c.x); baseY = Math.round(c.y);
     }
-    if (baseX !== undefined) {
-      created.forEach(function (n, k) {
-        var d = data.nodes[k];
-        var dx = d.absX !== undefined && minX !== Infinity ? d.absX - minX : 0;
-        var dy = d.absY !== undefined && minY !== Infinity ? d.absY - minY : 0;
-        n.x = Math.round(baseX + dx);
-        n.y = Math.round(baseY + dy);
-      });
+    try {
+      for (var i = 0; i < data.nodes.length; i++) {
+        var d = data.nodes[i];
+        var n = await importNode(d, parent, ctx);
+        if (!n) continue;
+        created.push(n);
+        if (baseX !== undefined) {
+          var dx = d.absX !== undefined && minX !== Infinity ? d.absX - minX : 0;
+          n.x = Math.round(baseX + dx);
+        }
+        if (baseY !== undefined) {
+          var dy = d.absY !== undefined && minY !== Infinity ? d.absY - minY : 0;
+          n.y = Math.round(baseY + dy);
+        }
+      }
+      if (created.length) {
+        figma.viewport.scrollAndZoomIntoView(created);
+        figma.currentPage.selection = created;
+      }
+    } catch (e) {
+      ctx.made.reverse().forEach(function (r) { try { if (!r.removed) r.remove(); } catch (e2) {} });
+      throw e;
     }
-    figma.currentPage.selection = created;
-    figma.viewport.scrollAndZoomIntoView(created);
     return {
       created: created.map(function (n) { return serialize(n, 0); }),
       layersCopied: ctx.count,
@@ -933,20 +940,71 @@ async function withBackground(n, bytes, color, format, scale) {
   }
 }
 
+// El enlace asociado se guarda dentro del documento para recuperarlo al reabrir el plugin
+function readStoredLink() {
+  try {
+    var key = figma.root.getPluginData('bifrostFileKey');
+    if (!/^[A-Za-z0-9]+$/.test(key)) return null;
+    return { key: key, url: figma.root.getPluginData('bifrostFileLink') };
+  } catch (e) { return null; }
+}
+function writeStoredLink(key, url) {
+  try {
+    figma.root.setPluginData('bifrostFileKey', key);
+    figma.root.setPluginData('bifrostFileLink', url);
+  } catch (e) {
+    figma.notify('No se pudo guardar el enlace en este archivo');
+  }
+}
+
 figma.ui.onmessage = async function (msg) {
+  if (msg && msg.type === 'panel_ready' && /^[0-9a-f]{64}$/.test(msg.channel)) {
+    if (panelChannel) return;
+    panelChannel = msg.channel;
+    var token;
+    try { token = await figma.clientStorage.getAsync('bifrost-token'); } catch (e) {}
+    if (!token) figma.ui.show();
+    // La clave real de Figma tiene prioridad; si falta, usa el enlace guardado en el archivo
+    var realKey = typeof figma.fileKey === 'string' && figma.fileKey ? figma.fileKey : '';
+    var stored = realKey ? null : readStoredLink();
+    postToPanel({ type: 'init', fileName: figma.root.name,
+      fileKey: realKey || (stored ? stored.key : null),
+      fileKeySource: realKey ? 'figma' : (stored ? 'stored' : null),
+      storedLink: stored ? stored.url : '',
+      page: figma.currentPage.name, version: BIFROST_VERSION, token: token });
+    return;
+  }
+  if (msg && msg.type === 'save_link') {
+    if (typeof msg.key === 'string' && /^[A-Za-z0-9]+$/.test(msg.key) && typeof msg.url === 'string') {
+      writeStoredLink(msg.key, msg.url.slice(0, 2048));
+    }
+    return;
+  }
+  if (msg && msg.type === 'forget_link') {
+    writeStoredLink('', '');
+    return;
+  }
+  if (msg && msg.type === 'pair' && /^[0-9a-f]{64}$/.test(msg.token)) {
+    try {
+      await figma.clientStorage.setAsync('bifrost-token', msg.token);
+    } catch (e) {
+      figma.notify('No se pudo guardar el código de vinculación');
+    }
+    return;
+  }
   if (msg && msg.type === 'status') { onStatus(msg.state); return; }
   if (msg && msg.type === 'close') { figma.closePlugin('Claude desconectado'); return; }
   if (!msg || !msg.id || !msg.command) return;
-  var handler = commands[msg.command];
+  var handler = Object.prototype.hasOwnProperty.call(commands, msg.command) && commands[msg.command];
   // Avisa al servidor que el comando sigue vivo, para que no se corte por tiempo
   var progress = function (message) {
-    figma.ui.postMessage({ type: 'progress', id: msg.id, message: message === undefined ? null : String(message) });
+    postToPanel({ type: 'progress', id: msg.id, message: message === undefined ? null : String(message) });
   };
   try {
     if (!handler) throw new Error('Comando desconocido: ' + msg.command);
     var result = await handler(msg.params || {}, progress);
-    figma.ui.postMessage({ id: msg.id, result: result });
+    postToPanel({ id: msg.id, result: result });
   } catch (e) {
-    figma.ui.postMessage({ id: msg.id, error: (e && e.message) ? e.message : String(e) });
+    postToPanel({ id: msg.id, error: (e && e.message) ? e.message : String(e) });
   }
 };
